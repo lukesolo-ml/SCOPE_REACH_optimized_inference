@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mc_timeline"
+version = "0.1.0"
+description = "Monte Carlo timeline completion and scoring for autoregressive generative models"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "sglang",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
