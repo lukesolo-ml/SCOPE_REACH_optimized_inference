@@ -34,7 +34,7 @@ All you need to get started with generative risk scoring:
 ## 📦 Installation
 
 ```bash
-pip install -e scope_reach_pkg
+pip install -e SCOPE_REACH_optimized_inference
 ```
 
 ## ⏱️ Time-Based Termination (WIP)
