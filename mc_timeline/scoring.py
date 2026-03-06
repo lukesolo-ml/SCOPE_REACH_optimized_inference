@@ -19,7 +19,7 @@ import numpy as np
 import sglang as sgl
 
 from .types import GeneratedTrajectory, GenerationConfig, ScoredTrajectory, TrajectoryType
-
+from.generation import apply_time_truncation
 
 def _extract_token_logprobs(
     output: dict,
@@ -64,6 +64,7 @@ async def score_trajectory(
     config: GenerationConfig,
     traj: GeneratedTrajectory,
     prompt_tokens: list[int],
+    truncate_again: bool = False
 ) -> ScoredTrajectory:
     """Score a trajectory by extracting P(target_event) at each position.
 
@@ -83,10 +84,13 @@ async def score_trajectory(
         config: Generation configuration (used for token IDs, max_len).
         traj: The generated trajectory to score.
         prompt_tokens: The original prompt tokens for this patient.
+        truncate_again: If you want to perform a new timeline truncation 
+        (NOTE: If you just generated with the specified horizon this is not needed)
 
     Returns:
         A ScoredTrajectory with the computed score.
     """
+    use_time_stopping = config.max_time is not None and config.trunc_id is not None
     if not traj.output_ids:
         return ScoredTrajectory(trajectory=traj, score=0.0)
 
@@ -101,6 +105,13 @@ async def score_trajectory(
     max_scoring_len = config.max_len - len(prompt_tokens) - 10
     if len(scoring_ids) > max_scoring_len:
         scoring_ids = scoring_ids[:max_scoring_len]
+    # Truncate to time-window if one is specified and truncation hasn't yet occurred
+    if use_time_stopping and truncate_again:
+        scoring_ids, _ , _ = apply_time_truncation(
+            scoring_ids,
+            config.token_id_to_minutes,
+            config.max_time,
+        )
 
     if not scoring_ids:
         return ScoredTrajectory(trajectory=traj, score=0.0)

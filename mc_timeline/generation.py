@@ -146,7 +146,7 @@ def _get_logit_processor_str() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _apply_time_truncation(
+def apply_time_truncation(
     output_ids: list[int],
     token_id_to_minutes: dict[int, float],
     max_time: float,
@@ -286,7 +286,7 @@ async def generate_trajectory(
         if output_ids[-1] == config.trunc_id:
             output_ids = output_ids[:-1]
 
-        output_ids, was_time_truncated, truncation_idx = _apply_time_truncation(
+        output_ids, was_time_truncated, truncation_idx = apply_time_truncation(
             output_ids,
             config.token_id_to_minutes,
             config.max_time,
