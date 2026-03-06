@@ -92,11 +92,8 @@ async def score_trajectory(
 
     # Determine which output tokens to include in the scoring sequence
     if traj.traj_type == TrajectoryType.M1 and (config.target_event_id in traj.output_ids):
-        if config.target_event_id in traj.output_ids:
-            stop_idx = traj.output_ids.index(config.target_event_id)
-            scoring_ids = traj.output_ids[: stop_idx + 1]
-        else:
-            scoring_ids = traj.output_ids
+        stop_idx = traj.output_ids.index(config.target_event_id)
+        scoring_ids = traj.output_ids[: stop_idx + 1]
     else:
         scoring_ids = traj.output_ids
 
