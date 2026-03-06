@@ -90,14 +90,14 @@ async def score_trajectory(
     if not traj.output_ids:
         return ScoredTrajectory(trajectory=traj, score=0.0)
 
-    # Determine which output tokens to include in the scoring sequence
+    # Truncate to outcome for M1
     if traj.traj_type == TrajectoryType.M1 and (config.target_event_id in traj.output_ids):
         stop_idx = traj.output_ids.index(config.target_event_id)
         scoring_ids = traj.output_ids[: stop_idx + 1]
     else:
         scoring_ids = traj.output_ids
 
-    # Truncate to fit within context length
+    # Truncate to fit within context length (doesn't matter if we do this here or elsewhere)
     max_scoring_len = config.max_len - len(prompt_tokens) - 10
     if len(scoring_ids) > max_scoring_len:
         scoring_ids = scoring_ids[:max_scoring_len]
