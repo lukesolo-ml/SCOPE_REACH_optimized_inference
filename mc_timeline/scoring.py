@@ -124,13 +124,8 @@ async def score_trajectory(
 
     # Collect logprobs from both input and output positions
     dscg_logprobs = _extract_token_logprobs(
-        score_output, config.target_event_id, source="input", skip=2
+        score_output, config.target_event_id, source="input", skip=0
     )
-    output_logprobs = _extract_token_logprobs(
-        score_output, config.target_event_id, source="output"
-    )
-    if output_logprobs:
-        dscg_logprobs.append(output_logprobs[0])
 
     if not dscg_logprobs:
         return ScoredTrajectory(trajectory=traj, score=0.0)
