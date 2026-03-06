@@ -11,7 +11,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .types import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
+from .structures import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
 
 
 def save_trajectories(

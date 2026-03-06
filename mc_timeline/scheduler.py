@@ -21,7 +21,7 @@ import sglang as sgl
 
 from .generation import generate_trajectory
 from .scoring import score_trajectory
-from .types import (
+from .structures import (
     GeneratedTrajectory,
     GenerationConfig,
     PatientResults,
@@ -87,6 +87,7 @@ async def score_trajectories(
     config: GenerationConfig,
     trajectories: Sequence[GeneratedTrajectory],
     patient_tokens: Sequence[list[int]],
+    truncate_again: bool = False,
 ) -> list[ScoredTrajectory]:
     """Score a collection of trajectories by extracting logprobs.
 
@@ -100,7 +101,7 @@ async def score_trajectories(
         List of scored trajectories.
     """
     score_tasks = [
-        score_trajectory(engine, config, traj, patient_tokens[traj.patient_idx])
+        score_trajectory(engine, config, traj, patient_tokens[traj.patient_idx], truncate_again=truncate_again)
         for traj in trajectories
     ]
 
