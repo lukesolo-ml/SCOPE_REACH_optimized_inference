@@ -36,7 +36,7 @@ from .scheduler import (
     score_trajectories,
     create_engine
 )
-from .types import (
+from .structures import (
     GeneratedTrajectory,
     GenerationConfig,
     PatientResults,
