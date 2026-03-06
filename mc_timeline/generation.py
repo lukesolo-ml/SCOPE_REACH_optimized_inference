@@ -129,6 +129,7 @@ class DeferredTimeHorizonProcessor(CustomLogitProcessor):
         return logits
 
 
+
 # Serialized once at module level and reused across all generate_trajectory calls.
 _LOGIT_PROCESSOR_STR: str | None = None
 
