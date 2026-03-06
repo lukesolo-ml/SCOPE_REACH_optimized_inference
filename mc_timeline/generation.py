@@ -56,7 +56,7 @@ processor path, so final time-horizon semantics are identical.
 import sglang as sgl
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
-from .types import GeneratedTrajectory, GenerationConfig, TrajectoryType
+from .structures import GeneratedTrajectory, GenerationConfig, TrajectoryType
 
 # ---------------------------------------------------------------------------
 # Deferred time-horizon logit processor

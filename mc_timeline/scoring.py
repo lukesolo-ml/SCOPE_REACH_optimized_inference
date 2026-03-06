@@ -18,8 +18,8 @@ removed.
 import numpy as np
 import sglang as sgl
 
-from .types import GeneratedTrajectory, GenerationConfig, ScoredTrajectory, TrajectoryType
-from.generation import apply_time_truncation
+from .structures import GeneratedTrajectory, GenerationConfig, ScoredTrajectory, TrajectoryType
+from .generation import apply_time_truncation
 
 def _extract_token_logprobs(
     output: dict,
@@ -84,8 +84,10 @@ async def score_trajectory(
         config: Generation configuration (used for token IDs, max_len).
         traj: The generated trajectory to score.
         prompt_tokens: The original prompt tokens for this patient.
-        truncate_again: If you want to perform a new timeline truncation 
-        (NOTE: If you just generated with the specified horizon this is not needed)
+        truncate_again: If True, apply post-hoc time truncation to the
+            trajectory before scoring. Use this when the trajectory was
+            generated WITHOUT a time horizon but you want to score it
+            AS IF a time horizon had been applied.
 
     Returns:
         A ScoredTrajectory with the computed score.
@@ -105,9 +107,10 @@ async def score_trajectory(
     max_scoring_len = config.max_len - len(prompt_tokens) - 10
     if len(scoring_ids) > max_scoring_len:
         scoring_ids = scoring_ids[:max_scoring_len]
+
     # Truncate to time-window if one is specified and truncation hasn't yet occurred
     if use_time_stopping and truncate_again:
-        scoring_ids, _ , _ = apply_time_truncation(
+        scoring_ids, _, _ = apply_time_truncation(
             scoring_ids,
             config.token_id_to_minutes,
             config.max_time,
@@ -130,7 +133,8 @@ async def score_trajectory(
         token_ids_logprob=[config.target_event_id],
     )
 
-    # Collect logprobs from both input and output positions
+    # Collect logprobs from input positions (the generated tokens are in
+    # the "input" of this prefill-only pass)
     dscg_logprobs = _extract_token_logprobs(
         score_output, config.target_event_id, source="input", skip=0
     )
