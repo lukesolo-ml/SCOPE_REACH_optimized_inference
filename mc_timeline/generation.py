@@ -33,24 +33,7 @@ Requirements when using time-based stopping:
   - trunc_id must NOT be logit-suppressed; the package handles this
     automatically even if trunc_id appears in config.suppressed_ids.
       NOTE: THIS IS ALSO IMPORTANT
-
-Chunked post-hoc generation
-----------------------------
-An alternative to the deferred logit processor approach. Instead of attaching
-a custom logit processor (which imposes ~2x throughput overhead from SGLang's
-per-step dispatch), generation proceeds in fixed-size token chunks with
-time-horizon checks between rounds in Python.
-
-Advantages:
-  - No custom logit processor → no ``__call__`` dispatch overhead
-  - No ``disable_overlap_schedule`` needed → overlap scheduler runs freely
-  - No ``enable_custom_logit_processor`` needed → vanilla engine codepath
-  - SGLang's radix cache makes resubmission prefix cost minimal
-  - ``chunk_size`` is the tuning knob: larger = fewer round trips but more
-    overshoot tokens; smaller = tighter truncation but more rounds
-
-The chunked approach uses the same post-hoc exact truncation as the logit
-processor path, so final time-horizon semantics are identical.
+      TODO: This isn't particularly robust since not every vocab will have such an id
 """
 
 import sglang as sgl
