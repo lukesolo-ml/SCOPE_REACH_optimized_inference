@@ -81,7 +81,6 @@ async def generate_trajectories(
 
     return list(trajectories)
 
-
 async def score_trajectories(
     engine: sgl.Engine,
     config: GenerationConfig,
@@ -142,6 +141,72 @@ def aggregate_results(
 
     return [results[i] for i in range(num_patients)]
 
+async def generate_and_score_interleaved(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    patient_tokens: Sequence[list[int]],
+    target_token_id,
+) -> tuple[list[GeneratedTrajectory], list[PatientResults]]:
+    """Generate and score trajectories with immediate per-trajectory scoring.
+
+    Alternative to `generate_and_score` that submits each scoring request
+    as soon as its corresponding generation completes, rather than waiting
+    for all generations to finish. This maximizes radix cache hits since
+    the patient prefix KV entries are still warm when the scoring prefill
+    runs.
+
+    Output is identical to `generate_and_score`.
+
+    Args:
+        engine: SGLang inference engine.
+        config: Generation configuration.
+        patient_tokens: List of tokenized patient timelines.
+        target_token_id: Token ID for the target event.
+
+    Returns:
+        Tuple of (all generated trajectories, per-patient aggregated results).
+    """
+    total_start = time.time()
+
+    async def _generate_then_score(
+        tokens: list[int],
+        patient_idx: int,
+        sample_idx: int,
+        traj_type: TrajectoryType,
+    ) -> tuple[GeneratedTrajectory, ScoredTrajectory]:
+        traj = await generate_trajectory(
+            engine, config, tokens, patient_idx, sample_idx, traj_type
+        )
+        scored = await score_trajectory(engine, config, traj, tokens)
+        return traj, scored
+
+    tasks = []
+    for patient_idx, tokens in enumerate(patient_tokens):
+        for sample_idx in range(config.n_samp):
+            tasks.append(
+                _generate_then_score(tokens, patient_idx, sample_idx, TrajectoryType.M1)
+            )
+            tasks.append(
+                _generate_then_score(tokens, patient_idx, sample_idx, TrajectoryType.M2)
+            )
+
+    logger.info(f"Generating and scoring {len(tasks)} trajectories (interleaved)...")
+    start = time.time()
+    paired_results = await asyncio.gather(*tasks)
+    elapsed = time.time() - start
+    logger.info(f"Interleaved generate+score completed in {elapsed:.2f}s")
+
+    trajectories = [traj for traj, _ in paired_results]
+    scored = [s for _, s in paired_results]
+
+    results = aggregate_results(
+        scored, num_patients=len(patient_tokens), target_event_id=target_token_id
+    )
+
+    total_time = time.time() - total_start
+    logger.info(f"Total interleaved generate-and-score time: {total_time:.2f}s")
+
+    return trajectories, results
 
 async def generate_and_score(
     engine: sgl.Engine,

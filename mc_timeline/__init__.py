@@ -32,6 +32,7 @@ from .io import load_scores, load_trajectories, save_scores, save_trajectories
 from .scheduler import (
     aggregate_results,
     generate_and_score,
+    generate_and_score_interleaved,
     generate_trajectories,
     score_trajectories,
     create_engine
@@ -53,7 +54,7 @@ __all__ = [
     "TrajectoryType",
     # Scheduler functions
     "generate_and_score",
-    "generate_and_score_chunked",
+    "generate_and_score_interleaved",
     "generate_trajectories",
     "generate_trajectories_chunked",
     "score_trajectories",
