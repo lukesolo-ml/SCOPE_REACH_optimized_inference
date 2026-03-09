@@ -5,7 +5,8 @@ Generates M1 (target-event-allowed) and M2 (target-event-forbidden) trajectories
 using an SGLang engine. Generation is done without logprobs for speed; scoring
 is handled separately.
 
-TODO: Try to implement ability for simulatenous generation and scoring
+TODO: Double check simultaneous generation and scoring. It is currently slower under all configs
+NOTE: Simultaneous generation and scoring is currently slower under all configurations
 
 Time-based stopping
 -------------------
