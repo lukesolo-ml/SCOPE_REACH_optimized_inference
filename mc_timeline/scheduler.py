@@ -35,9 +35,12 @@ def create_engine(model_path, max_len, use_time_horizon = False):
     return sgl.Engine(
         model_path=model_path,
         skip_tokenizer_init=True,
-        disable_overlap_schedule = use_time_horizon,
-        enable_custom_logit_processor= use_time_horizon,
+        disable_overlap_schedule=use_time_horizon,
+        enable_custom_logit_processor=use_time_horizon,
         context_length=max_len,
+        attention_backend='flashinfer',
+        disable_cuda_graph=True,
+        sampling_backend="pytorch",
     )
 
 async def generate_trajectories(
