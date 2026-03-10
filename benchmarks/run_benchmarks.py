@@ -18,7 +18,7 @@ import polars as pl
 
 from .common import build_token_id_to_minutes
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 
