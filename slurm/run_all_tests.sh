@@ -9,8 +9,9 @@ source ~/lsolo-fms-local/bin/activate
 
 export hm="/mnt/bbj-lab/users/burkh4rt"
 export HF_HOME="/home/$(whoami)/cache/huggingface/"
-export parent_dir="$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]}")")")"
-export PYTHONPATH="/home/lsolo/sr_package:${parent_dir}:$PYTHONPATH"
+export parent_dir="/mnt/bbj-lab/users/lsolo/luke-ehr-fm-testing/fms-ehrs"
+export local_parent="$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]}")")")"
+export PYTHONPATH="/home/lsolo/sr_package:${parent_dir}:${local_parent}:${PYTHONPATH:-}"
 export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "/mnt/bbj-lab/.envs" | tr '\n' ':')
 export POLARS_VERBOSE=1
 export SGLANG_TRITON_ATTENTION_NUM_KV_SPLITS=4
@@ -31,7 +32,7 @@ echo "Output directory: ${OUTPUT_DIR}"
 # ---------------------------------------------------------------------------
 echo ""
 echo ">>> Running unit tests..."
-python -m pytest "${parent_dir}/tests/" \
+python -m pytest "${local_parent}/tests/" \
     -v --tb=short --no-header \
     2>&1 | tee "${OUTPUT_DIR}/unit_tests_${TIMESTAMP}.log"
 
