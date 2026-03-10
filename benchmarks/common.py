@@ -5,6 +5,8 @@ comparison table logging that were duplicated across 5 mode runners
 in the original run_tests.py.
 """
 
+import asyncio
+import gc
 import logging
 import math
 import time
@@ -12,6 +14,7 @@ from collections import defaultdict
 from typing import Sequence
 
 import numpy as np
+import torch
 from sklearn.metrics import roc_auc_score
 
 import sglang as sgl
@@ -138,6 +141,11 @@ class PhaseRunner:
         if self.engine is not None:
             self.engine.shutdown()
             self.engine = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            # Brief yield to let CUDA finalize resource release before
+            # a subsequent engine is created in the same process.
+            await asyncio.sleep(1)
 
     async def warmup(self, config: GenerationConfig, tokens: Sequence[list[int]]):
         """Run a small warmup pass."""
