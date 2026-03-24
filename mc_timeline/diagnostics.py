@@ -96,8 +96,7 @@ def log_trajectory_diagnostics(
         f"min={total_lens.min()}, median={np.median(total_lens):.0f}, "
         f"max={total_lens.max()}"
     )
-
-    # M1/M2 breakdown
+    
     for label, ttype in [("M1", TrajectoryType.M1), ("M2", TrajectoryType.M2)]:
         subset = [t for t in trajectories if t.traj_type == ttype]
         if not subset:

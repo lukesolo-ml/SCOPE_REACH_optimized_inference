@@ -46,12 +46,8 @@ class GenerationConfig:
         max_time: Maximum simulated time in minutes. Generation stops (by forcing
             trunc_id) once the sum of token_id_to_minutes values in the generated
             output meets or exceeds this threshold. Requires trunc_id to be set.
-        time_check_interval: Number of tokens to generate before first checking
-            elapsed time.  The logit processor is a no-op for the first
-            time_check_interval tokens, avoiding per-step overhead during the
-            early phase of generation where the time horizon cannot possibly be
-            reached.  After the first check fires, subsequent checks occur every
-            time_check_interval tokens.  Default 100.
+        time_check_interval: Number of tokens to generate before checking
+            elapsed time. 
     """
 
     max_len: int

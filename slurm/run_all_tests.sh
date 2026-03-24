@@ -51,8 +51,8 @@ BENCH_COMMON_ARGS=(
     --data_version "Y21_first_24h"
     --model_loc "/mnt/bbj-lab/users/burkh4rt/mdls-archive/gemma-5635921-Y21"
     --max_len 10000
-    --n_samp 20
-    --test_size 800
+    --n_samp 10
+    --test_size 10
 )
 
 for MODE in baseline with_lp benchmark truncation_test interleave_test; do

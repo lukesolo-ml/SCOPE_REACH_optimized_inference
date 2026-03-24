@@ -3,6 +3,8 @@ Persistence for generated trajectories and scores.
 
 Trajectories are stored as compressed NumPy archives (.npz) grouped by patient.
 Scores are stored as a single NumPy archive with M0, M1, M2 arrays.
+
+TODO: Need more robust testing of the saving and loading.
 """
 
 import json
