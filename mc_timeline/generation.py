@@ -5,8 +5,8 @@ Generates M1 (target-event-allowed) and M2 (target-event-forbidden) trajectories
 using an SGLang engine. Generation is done without logprobs for speed; scoring
 is handled separately.
 
-TODO: Double check simultaneous generation and scoring. It is currently slower under all configs
-NOTE: Simultaneous generation and scoring is currently slower under all configurations
+TODO: Double check simultaneous generation and scoring. It is currently much slower under all configs
+NOTE: Simultaneous generation and scoring is currently not recommended.
 
 Time-based stopping
 -------------------
@@ -108,6 +108,8 @@ class DeferredTimeHorizonProcessor(CustomLogitProcessor):
             if elapsed >= param_dict["time_horizon"]:
                 trunc_id: int = param_dict["trunc_id"]
                 logits[i, :] = float("-inf")
+                # Key that we are directly setting the logit since trunc_id
+                # is likely in restricted vocab
                 logits[i, trunc_id] = 0.0
 
         return logits
