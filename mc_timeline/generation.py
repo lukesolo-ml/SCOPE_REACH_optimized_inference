@@ -166,23 +166,6 @@ def apply_time_truncation(
 
     return output_ids, False, None
 
-
-# ---------------------------------------------------------------------------
-# Helpers for computing elapsed simulated time
-# ---------------------------------------------------------------------------
-
-
-def _compute_elapsed_minutes(
-    output_ids: list[int],
-    token_id_to_minutes: dict[int, float],
-) -> float:
-    """Sum the simulated elapsed minutes across all tokens in output_ids."""
-    elapsed = 0.0
-    for tid in output_ids:
-        elapsed += token_id_to_minutes.get(tid, 0.0)
-    return elapsed
-
-
 # ---------------------------------------------------------------------------
 # Core generation function (logit processor path)
 # ---------------------------------------------------------------------------
