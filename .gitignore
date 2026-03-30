@@ -1,0 +1,21 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Egg / build artifacts
+*.egg-info/
+*.egg
+dist/
+build/
+
+# SLURM output logs
+slurm/output/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
