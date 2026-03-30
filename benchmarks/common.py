@@ -22,7 +22,6 @@ import sglang as sgl
 from mc_timeline import (
     GenerationConfig,
     generate_and_score,
-    generate_and_score_interleaved,
     generate_trajectories,
     score_trajectories,
     aggregate_results,
