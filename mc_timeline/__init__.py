@@ -20,7 +20,7 @@ Typical usage:
     engine = sgl.Engine(model_path="...", skip_tokenizer_init=True, context_length=10000)
     config = GenerationConfig(
         max_len=10000, n_samp=20,
-        target_event_id=42, timeline_end_id=43,
+        target_event_id=42, 
         suppressed_ids=[0, 1],
     )
 
@@ -54,7 +54,6 @@ __all__ = [
     # Scheduler functions
     "generate_and_score",
     "generate_trajectories",
-    "generate_trajectories_chunked",
     "score_trajectories",
     "aggregate_results",
     "create_engine",

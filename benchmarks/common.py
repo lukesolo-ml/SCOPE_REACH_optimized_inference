@@ -166,18 +166,6 @@ class PhaseRunner:
         wall_time = time.time() - start
         return trajectories, results, wall_time
 
-    async def run_interleaved(
-        self, config: GenerationConfig, patient_tokens: Sequence[list[int]],
-    ):
-        """Interleaved generate+score, returning (trajectories, results, wall_time)."""
-        start = time.time()
-        trajectories, results = await generate_and_score_interleaved(
-            self.engine, config, patient_tokens,
-            target_token_id=config.target_event_id,
-        )
-        wall_time = time.time() - start
-        return trajectories, results, wall_time
-
     async def run_generate_then_rescore(
         self,
         gen_config: GenerationConfig,
