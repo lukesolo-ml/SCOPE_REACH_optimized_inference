@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--time_check_interval", type=int, default=100)
     parser.add_argument(
         "--generation_mode", type=str, default="with_lp",
-        choices=["baseline", "with_lp", "benchmark", "truncation_test"],
+        choices=["baseline", "with_lp", "benchmark", "truncation_test", "io_roundtrip"],
     )
     return parser.parse_args()
 
@@ -136,6 +136,10 @@ async def async_main():
             logger.error("truncation_test requires --time_horizon_minutes")
             return
         from .bench_truncation import run
+        await run(**common, **time_kwargs)
+
+    elif mode == "io_roundtrip":
+        from .bench_io_roundtrip import run
         await run(**common, **time_kwargs)
 
     logger.info("---fin")

@@ -56,7 +56,7 @@ BENCH_COMMON_ARGS=(
     --test_size 10
 )
 
-for MODE in baseline with_lp benchmark truncation_test ; do
+for MODE in baseline with_lp benchmark truncation_test io_roundtrip ; do
     echo ""
     echo ">>> Running benchmark: ${MODE}..."
 
@@ -65,6 +65,8 @@ for MODE in baseline with_lp benchmark truncation_test ; do
     if [ "$MODE" = "truncation_test" ] || [ "$MODE" = "with_lp" ]; then
         MODE_ARGS+=(--time_horizon_minutes 1440000000000000)
     elif [ "$MODE" = "benchmark" ]; then
+        MODE_ARGS+=(--time_horizon_minutes 1440000000000000)
+    elif [ "$MODE" = "io_roundtrip" ]; then
         MODE_ARGS+=(--time_horizon_minutes 1440000000000000)
     fi
 

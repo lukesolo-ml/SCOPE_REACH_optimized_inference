@@ -3,8 +3,86 @@
 import numpy as np
 import pytest
 
-from mc_timeline.io import save_scores, load_scores
-from mc_timeline.structures import PatientResults
+from mc_timeline.io import save_scores, load_scores, save_trajectories, load_trajectories
+from mc_timeline.structures import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
+
+
+# ---------------------------------------------------------------------------
+# save_trajectories / load_trajectories roundtrip
+# ---------------------------------------------------------------------------
+
+
+class TestTrajectoryRoundtrip:
+    """Test trajectory save/load cycle."""
+
+    def test_roundtrip_preserves_all_fields(self, tmp_path):
+        trajs = [
+            GeneratedTrajectory(
+                patient_idx=0, sample_idx=0, traj_type=TrajectoryType.M1,
+                prompt_len=10, output_ids=[1, 2, 3, 4, 5],
+                timeline_terminating_id=5, was_time_truncated=False,
+                truncation_idx=None,
+            ),
+            GeneratedTrajectory(
+                patient_idx=0, sample_idx=0, traj_type=TrajectoryType.M2,
+                prompt_len=10, output_ids=[1, 2, 3],
+                timeline_terminating_id=None, was_time_truncated=True,
+                truncation_idx=3,
+            ),
+            GeneratedTrajectory(
+                patient_idx=1, sample_idx=0, traj_type=TrajectoryType.M1,
+                prompt_len=15, output_ids=[10, 20],
+                timeline_terminating_id=20, was_time_truncated=False,
+                truncation_idx=None,
+            ),
+        ]
+
+        save_trajectories(trajs, tmp_path)
+        loaded, config = load_trajectories(tmp_path)
+
+        assert config is None
+        assert len(loaded) == len(trajs)
+
+        for orig, ld in zip(trajs, loaded):
+            assert ld.patient_idx == orig.patient_idx
+            assert ld.sample_idx == orig.sample_idx
+            assert ld.traj_type == orig.traj_type
+            assert ld.prompt_len == orig.prompt_len
+            assert ld.output_ids == orig.output_ids
+            assert ld.timeline_terminating_id == orig.timeline_terminating_id
+            assert ld.was_time_truncated == orig.was_time_truncated
+            assert ld.truncation_idx == orig.truncation_idx
+
+    def test_roundtrip_with_config(self, tmp_path):
+        trajs = [
+            GeneratedTrajectory(
+                patient_idx=0, sample_idx=0, traj_type=TrajectoryType.M1,
+                prompt_len=5, output_ids=[1, 2],
+                timeline_terminating_id=2,
+            ),
+        ]
+        config = GenerationConfig(
+            max_len=100, n_samp=10, target_event_id=42,
+            end_token_ids={43, 44},
+        )
+        save_trajectories(trajs, tmp_path, config=config)
+        loaded, loaded_config = load_trajectories(tmp_path)
+
+        assert loaded_config is not None
+        assert loaded_config.max_len == 100
+        assert loaded_config.target_event_id == 42
+
+    def test_empty_output_ids(self, tmp_path):
+        trajs = [
+            GeneratedTrajectory(
+                patient_idx=0, sample_idx=0, traj_type=TrajectoryType.M2,
+                prompt_len=5, output_ids=[],
+                timeline_terminating_id=None,
+            ),
+        ]
+        save_trajectories(trajs, tmp_path)
+        loaded, _ = load_trajectories(tmp_path)
+        assert loaded[0].output_ids == []
 
 
 # ---------------------------------------------------------------------------
