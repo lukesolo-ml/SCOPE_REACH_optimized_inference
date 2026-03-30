@@ -4,7 +4,7 @@ Persistence for generated trajectories and scores.
 Trajectories are stored as compressed NumPy archives (.npz) grouped by patient.
 Scores are stored as a single NumPy archive with M0, M1, M2 arrays.
 
-TODO: Need more robust testing of the saving and loading.
+Roundtrip correctness is validated by bench_io_roundtrip.
 """
 
 import json
@@ -56,6 +56,8 @@ def save_trajectories(
     output_ids_flat = []
     output_ids_offsets = [0]
 
+    timeline_terminating_ids = []
+
     for traj in trajectories:
         patient_idxs.append(traj.patient_idx)
         sample_idxs.append(traj.sample_idx)
@@ -64,6 +66,9 @@ def save_trajectories(
         was_time_truncateds.append(traj.was_time_truncated)
         truncation_idxs.append(
             traj.truncation_idx if traj.truncation_idx is not None else -1
+        )
+        timeline_terminating_ids.append(
+            traj.timeline_terminating_id if traj.timeline_terminating_id is not None else -1
         )
         output_ids_flat.extend(traj.output_ids)
         output_ids_offsets.append(len(output_ids_flat))
@@ -76,6 +81,7 @@ def save_trajectories(
         prompt_len=np.array(prompt_lens, dtype=np.int32),
         was_time_truncated=np.array(was_time_truncateds, dtype=bool),
         truncation_idx=np.array(truncation_idxs, dtype=np.int32),
+        timeline_terminating_id=np.array(timeline_terminating_ids, dtype=np.int32),
         output_ids_flat=np.array(output_ids_flat, dtype=np.int32),
         output_ids_offsets=np.array(output_ids_offsets, dtype=np.int64),
     )
@@ -85,7 +91,7 @@ def save_trajectories(
             "max_len": config.max_len,
             "n_samp": config.n_samp,
             "target_event_id": config.target_event_id,
-            "timeline_end_id": config.timeline_end_id,
+            "end_token_ids": sorted(config.end_token_ids),
             "suppressed_ids": config.suppressed_ids,
             "temperature": config.temperature,
             "trunc_id": config.trunc_id,
@@ -119,8 +125,6 @@ def load_trajectories(
     sample_idxs = data["sample_idx"]
     traj_types = data["traj_type"]
     prompt_lens = data["prompt_len"]
-    has_timeline_ends = data["has_timeline_end"]
-    has_target_events = data["has_target_event"]
     was_time_truncateds = (
         data["was_time_truncated"]
         if "was_time_truncated" in data.files
@@ -129,6 +133,11 @@ def load_trajectories(
     truncation_idxs = (
         data["truncation_idx"]
         if "truncation_idx" in data.files
+        else [-1] * len(patient_idxs)
+    )
+    timeline_terminating_ids = (
+        data["timeline_terminating_id"]
+        if "timeline_terminating_id" in data.files
         else [-1] * len(patient_idxs)
     )
     output_ids_flat = data["output_ids_flat"]
@@ -141,6 +150,7 @@ def load_trajectories(
         output_ids = output_ids_flat[start:end].tolist()
 
         trunc_idx_val = int(truncation_idxs[i])
+        term_id_val = int(timeline_terminating_ids[i])
 
         trajectories.append(
             GeneratedTrajectory(
@@ -149,8 +159,7 @@ def load_trajectories(
                 traj_type=TrajectoryType(str(traj_types[i])),
                 prompt_len=int(prompt_lens[i]),
                 output_ids=output_ids,
-                has_timeline_end=bool(has_timeline_ends[i]),
-                has_target_event=bool(has_target_events[i]),
+                timeline_terminating_id=term_id_val if term_id_val >= 0 else None,
                 was_time_truncated=bool(was_time_truncateds[i]),
                 truncation_idx=trunc_idx_val if trunc_idx_val >= 0 else None,
             )
@@ -165,6 +174,8 @@ def load_trajectories(
             d["token_id_to_minutes"] = {
                 int(k): v for k, v in d["token_id_to_minutes"].items()
             }
+        if "end_token_ids" in d:
+            d["end_token_ids"] = set(d["end_token_ids"])
         config = GenerationConfig(**d)
 
     return trajectories, config
