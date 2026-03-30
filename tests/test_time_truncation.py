@@ -2,7 +2,7 @@
 
 import pytest
 
-from mc_timeline.generation import apply_time_truncation, _compute_elapsed_minutes
+from mc_timeline.generation import apply_time_truncation
 
 
 # ---------------------------------------------------------------------------
