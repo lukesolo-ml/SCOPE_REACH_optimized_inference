@@ -155,8 +155,7 @@ This gives exact time-horizon semantics at near-baseline generation throughput.
 
 | Function | Description |
 |:---|:---|
-| `generate_and_score(engine, config, input_sequences, target_token_id)` | **Recommended.** Generate all trajectories, then score them. Keeps radix cache warm for the scoring pass. |
-| `generate_and_score_interleaved(engine, config, input_sequences, target_token_id)` | Alternative: score each trajectory immediately after its generation completes. Maximizes per-sequence cache locality. |
+| `generate_and_score(engine, config, input_sequences, target_token_id)` | Generate all trajectories, then score them. Keeps radix cache warm for the scoring pass. |
 | `generate_trajectories(engine, config, input_sequences)` | Generation only. Returns `list[GeneratedTrajectory]`. |
 | `score_trajectories(engine, config, trajectories, input_sequences)` | Scoring only. Takes previously generated trajectories and returns `list[ScoredTrajectory]`. |
 | `aggregate_results(scored_trajectories, num_inputs, target_event_id)` | Aggregates scored trajectories into per-input `PatientResults` (M0, M1, M2 sample lists). |
