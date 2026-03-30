@@ -1,0 +1,98 @@
+2026-03-30 10:49:22,232 __main__ data_dir: /mnt/bbj-lab/users/burkh4rt/data-mimic
+2026-03-30 10:49:22,232 __main__ data_version: Y21_first_24h
+2026-03-30 10:49:22,232 __main__ model_loc: /mnt/bbj-lab/users/burkh4rt/mdls-archive/gemma-5635921-Y21
+2026-03-30 10:49:22,232 __main__ tto_version: Y21_first_24h
+2026-03-30 10:49:22,232 __main__ max_len: 10000
+2026-03-30 10:49:22,232 __main__ n_samp: 10
+2026-03-30 10:49:22,232 __main__ test_size: 10
+2026-03-30 10:49:22,232 __main__ resample_size: 100
+2026-03-30 10:49:22,232 __main__ n_resamples: 200
+2026-03-30 10:49:22,232 __main__ time_horizon_minutes: 1440.0
+2026-03-30 10:49:22,232 __main__ time_check_interval: 100
+2026-03-30 10:49:22,232 __main__ generation_mode: interleave_test
+_init_credential_provider_builder(): credential_provider_init = None
+PREFILL CACHES
+CachePrefiller: concurrent streaming scan exec limit: 32
+async thread count: 4
+CachePrefiller: wait for 1 scan executors
+CACHE SET: cache id: UniqueId(012e6ec6-9eae-4ec8-9a50-788da02b1852)
+polars-stream: updating graph state
+polars-stream: running in-memory-sink in subgraph
+polars-stream: running multi-scan[parquet] in subgraph
+[MultiScanTaskInit]: 1 sources, reader name: parquet, ReaderCapabilities(ROW_INDEX | PRE_SLICE | NEGATIVE_PRE_SLICE | PARTIAL_FILTER | FULL_FILTER | MAPPED_COLUMN_PROJECTION), n_readers_pre_init: 1, max_concurrent_scans: 1
+[MultiScanTaskInit]: predicate: None, skip files mask: None, predicate to reader: None
+[MultiScanTaskInit]: scan_source_idx: 0, extra_ops: ExtraOperations { row_index: None, row_index_col_idx: 18446744073709551615, pre_slice: None, include_file_paths: None, file_path_col_idx: 18446744073709551615, predicate: None }
+[MultiScanTaskInit]: Readers init: 1 / (1 total) (range: 0..1, filtered out: 0)
+[MultiScan]: Initialize source 0
+[ReaderStarter]: scan_source_idx: 0
+[ReaderStarter]: max_concurrent_scans is 1, waiting..
+[AttachReaderToBridge]: received reader (n_readers_received: 1)
+[ReaderStarter]: scan_source_idx: 0: pre_slice_to_reader: None, external_filter_mask: None, file_iceberg_schema: None
+memory prefetch function: madvise_willneed
+[ParquetFileReader]: project: 7 / 7, pre_slice: None, resolved_pre_slice: None, row_index: None, predicate: None 
+[ParquetFileReader]: Config { num_pipelines: 32, row_group_prefetch_size: 128, target_values_per_thread: 16777216 }
+[ParquetFileReader]: ideal_morsel_size: 100000
+start_reader_impl: scan_source_idx: 0, first_morsel_position: RowCounter { physical_rows: 0, deleted_rows: 0 }
+start_reader_impl: scan_source_idx: 0, ApplyExtraOps::Noop, first_morsel_position: RowCounter { physical_rows: 0, deleted_rows: 0 }
+[ReaderStarter]: Stopping (no more readers)
+[MultiScanState]: Readers disconnected
+polars-stream: done running graph phase
+polars-stream: updating graph state
+EXECUTE PHYS PLAN
+CACHE HIT: cache id: UniqueId(012e6ec6-9eae-4ec8-9a50-788da02b1852)
+CACHE DROP: cache id: UniqueId(012e6ec6-9eae-4ec8-9a50-788da02b1852)
+_init_credential_provider_builder(): credential_provider_init = None
+PREFILL CACHES
+CachePrefiller: concurrent streaming scan exec limit: 32
+CachePrefiller: wait for 1 scan executors
+CACHE SET: cache id: UniqueId(d9d61a23-65fd-4ea4-aeab-5b264a887b1d)
+polars-stream: updating graph state
+polars-stream: running in-memory-sink in subgraph
+polars-stream: running multi-scan[parquet] in subgraph
+[MultiScanTaskInit]: 1 sources, reader name: parquet, ReaderCapabilities(ROW_INDEX | PRE_SLICE | NEGATIVE_PRE_SLICE | PARTIAL_FILTER | FULL_FILTER | MAPPED_COLUMN_PROJECTION), n_readers_pre_init: 1, max_concurrent_scans: 1
+[MultiScanTaskInit]: predicate: None, skip files mask: None, predicate to reader: None
+[MultiScanTaskInit]: scan_source_idx: 0, extra_ops: ExtraOperations { row_index: None, row_index_col_idx: 18446744073709551615, pre_slice: None, include_file_paths: None, file_path_col_idx: 18446744073709551615, predicate: None }
+[MultiScanTaskInit]: Readers init: 1 / (1 total) (range: 0..1, filtered out: 0)
+[MultiScan]: Initialize source 0
+[ReaderStarter]: scan_source_idx: 0
+[ReaderStarter]: max_concurrent_scans is 1, waiting..
+[AttachReaderToBridge]: received reader (n_readers_received: 1)
+[ReaderStarter]: scan_source_idx: 0: pre_slice_to_reader: None, external_filter_mask: None, file_iceberg_schema: None
+memory prefetch function: madvise_willneed
+[ParquetFileReader]: project: 16 / 16, pre_slice: None, resolved_pre_slice: None, row_index: None, predicate: None 
+[ParquetFileReader]: Config { num_pipelines: 32, row_group_prefetch_size: 128, target_values_per_thread: 16777216 }
+[ParquetFileReader]: ideal_morsel_size: 100000
+start_reader_impl: scan_source_idx: 0, first_morsel_position: RowCounter { physical_rows: 0, deleted_rows: 0 }
+start_reader_impl: scan_source_idx: 0, ApplyExtraOps::Noop, first_morsel_position: RowCounter { physical_rows: 0, deleted_rows: 0 }
+[ReaderStarter]: Stopping (no more readers)
+[MultiScanState]: Readers disconnected
+polars-stream: done running graph phase
+polars-stream: updating graph state
+EXECUTE PHYS PLAN
+CACHE HIT: cache id: UniqueId(d9d61a23-65fd-4ea4-aeab-5b264a887b1d)
+CACHE DROP: cache id: UniqueId(d9d61a23-65fd-4ea4-aeab-5b264a887b1d)
+join parallel: true
+LEFT join dataframes finished
+dataframe filtered
+dataframe filtered
+2026-03-30 10:49:28,380 __main__ Balanced cohort: 10 patients (5 positive, 5 negative)
+2026-03-30 10:49:28,413 __main__ Time-based stopping: horizon=1440.0 min, check_interval=100, 13 time tokens
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/lsolo/sr_package/benchmarks/run_benchmarks.py", line 153, in <module>
+    main()
+  File "/home/lsolo/sr_package/benchmarks/run_benchmarks.py", line 149, in main
+    asyncio.run(async_main())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/lsolo/sr_package/benchmarks/run_benchmarks.py", line 142, in async_main
+    from .bench_interleave import run
+ModuleNotFoundError: No module named 'benchmarks.bench_interleave'

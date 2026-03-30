@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+mkdir -p "${OUTPUT_DIR}/${TIMESTAMP}"
 
 echo "=== mc_timeline test run: ${TIMESTAMP} ==="
 echo "Output directory: ${OUTPUT_DIR}"
@@ -55,23 +56,23 @@ BENCH_COMMON_ARGS=(
     --test_size 10
 )
 
-for MODE in baseline with_lp benchmark truncation_test interleave_test; do
+for MODE in baseline with_lp benchmark truncation_test ; do
     echo ""
     echo ">>> Running benchmark: ${MODE}..."
 
     # truncation_test requires a time horizon
     MODE_ARGS=()
     if [ "$MODE" = "truncation_test" ] || [ "$MODE" = "with_lp" ]; then
-        MODE_ARGS+=(--time_horizon_minutes 1440)
-    elif [ "$MODE" = "benchmark" ] || [ "$MODE" = "interleave_test" ]; then
-        MODE_ARGS+=(--time_horizon_minutes 1440)
+        MODE_ARGS+=(--time_horizon_minutes 1440000000000000)
+    elif [ "$MODE" = "benchmark" ]; then
+        MODE_ARGS+=(--time_horizon_minutes 1440000000000000)
     fi
 
     python -m benchmarks.run_benchmarks \
         "${BENCH_COMMON_ARGS[@]}" \
         "${MODE_ARGS[@]}" \
         --generation_mode "$MODE" \
-        2>&1 | tee "${OUTPUT_DIR}/bench_${MODE}_${TIMESTAMP}.log"
+        2>&1 | tee "${OUTPUT_DIR}/${TIMESTAMP}/bench_${MODE}.log"
 
     BENCH_EXIT=${PIPESTATUS[0]}
     if [ $BENCH_EXIT -ne 0 ]; then

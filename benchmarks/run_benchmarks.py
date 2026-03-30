@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--time_check_interval", type=int, default=100)
     parser.add_argument(
         "--generation_mode", type=str, default="with_lp",
-        choices=["baseline", "with_lp", "benchmark", "truncation_test", "interleave_test"],
+        choices=["baseline", "with_lp", "benchmark", "truncation_test"],
     )
     return parser.parse_args()
 
@@ -137,10 +137,6 @@ async def async_main():
             return
         from .bench_truncation import run
         await run(**common, **time_kwargs)
-
-    elif mode == "interleave_test":
-        from .bench_interleave import run
-        await run(**common, **time_kwargs, use_time_stopping=use_time_stopping)
 
     logger.info("---fin")
 

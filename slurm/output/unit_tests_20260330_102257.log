@@ -1,0 +1,18 @@
+============================= test session starts ==============================
+collecting ... collected 37 items / 1 error
+
+==================================== ERRORS ====================================
+________________ ERROR collecting tests/test_time_truncation.py ________________
+ImportError while importing test module '/home/lsolo/sr_package/tests/test_time_truncation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../tests/test_time_truncation.py:5: in <module>
+    from mc_timeline.generation import apply_time_truncation, _compute_elapsed_minutes
+E   ImportError: cannot import name '_compute_elapsed_minutes' from 'mc_timeline.generation' (/home/lsolo/sr_package/mc_timeline/generation.py)
+=========================== short test summary info ============================
+ERROR ../tests/test_time_truncation.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.04s ===============================

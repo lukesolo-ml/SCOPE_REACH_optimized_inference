@@ -5,7 +5,7 @@ Orchestrates two-phase processing:
   Phase 1: Generate M1 and M2 trajectories interleaved by patient for
            radix cache locality.
   Phase 2: Score trajectories via prefill-only logprob extraction.
-TODO: Test and compare generate_and_score and generate_and_score_interleaved
+TODO: Re-implement a new version of generate and score interleaved
 The scheduler supports three modes of operation:
   - generate_only: Generate trajectories and return/save them without scoring.
   - generate_and_score: Generate then immediately score (keeps radix cache hot).
@@ -41,6 +41,8 @@ def create_engine(model_path, max_len, use_time_horizon = False):
         attention_backend='flashinfer',
         disable_cuda_graph=True,
         sampling_backend="pytorch",
+        mem_fraction_static=0.40,
+        log_level='info',
     )
 
 async def generate_trajectories(
