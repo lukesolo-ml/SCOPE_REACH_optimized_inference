@@ -1,8 +1,8 @@
-"""Unit tests for data structures in mc_timeline.structures."""
+"""Unit tests for data structures in quick_sco_re.structures."""
 
 import pytest
 
-from mc_timeline.structures import (
+from quick_sco_re.structures import (
     GeneratedTrajectory,
     GenerationConfig,
     PatientResults,

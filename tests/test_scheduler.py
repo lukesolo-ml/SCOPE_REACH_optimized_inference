@@ -2,12 +2,12 @@
 
 import pytest
 
-from mc_timeline.structures import (
+from quick_sco_re.structures import (
     GeneratedTrajectory,
     ScoredTrajectory,
     TrajectoryType,
 )
-from mc_timeline.scheduler import aggregate_results
+from quick_sco_re.scheduler import aggregate_results
 from .conftest import make_trajectory, TARGET_EVENT_ID
 
 

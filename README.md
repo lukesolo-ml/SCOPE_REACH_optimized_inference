@@ -4,13 +4,13 @@
   <a href="https://arxiv.org/abs/2602.03730"><img src="https://img.shields.io/badge/arXiv-2602.03730-b31b1b?logo=arxiv&logoColor=white" alt="arXiv"/></a>
 </p>
 
-# SCOPE & REACH — `mc_timeline`
+# SCOPE & REACH — `quick_sco_re`
 
 **Variance-reduced event-probability estimation for any autoregressive generative model.**
 
 Standard Monte Carlo (MC) estimation generates *n* trajectory completions from a model and counts how many contain a target event. This is unbiased but wasteful — the model's full next-token probability distribution is computed at every decoding step, yet only the single sampled token is kept. SCOPE and REACH use those discarded distributions to produce better estimates from far fewer samples.
 
-This package, `mc_timeline`, is a **model-agnostic and data-agnostic** implementation. It works with any autoregressive model that can be served via [SGLang](https://github.com/sgl-project/sglang) — you just need to specify which token IDs represent the target event, which represent sequence termination, and which (if any) should be suppressed.
+This package, `quick_sco_re`, is a **model-agnostic and data-agnostic** implementation. It works with any autoregressive model that can be served via [SGLang](https://github.com/sgl-project/sglang) — you just need to specify which token IDs represent the target event, which represent sequence termination, and which (if any) should be suppressed.
 
 <p align="center">
   <a href="https://arxiv.org/abs/2602.03730"><strong>Paper</strong></a> ·
@@ -59,7 +59,7 @@ pip install -e ".[dev]"     # adds pytest, pytest-asyncio
 
 ```python
 import sglang as sgl
-from mc_timeline import GenerationConfig, generate_and_score, save_scores
+from quick_sco_re import GenerationConfig, generate_and_score, save_scores
 
 # 1. Point SGLang at your model
 engine = sgl.Engine(
@@ -124,7 +124,7 @@ Everything is controlled through `GenerationConfig`:
 Use `create_engine()` for correct SGLang flags:
 
 ```python
-from mc_timeline import create_engine
+from quick_sco_re import create_engine
 
 # Without time-based stopping
 engine = create_engine(model_path="path/to/model", max_len=4096)
@@ -139,7 +139,7 @@ Or configure SGLang directly — the key flags for time-based stopping are `disa
 
 ## Time-Based Stopping
 
-Some models generate sequences where tokens carry temporal semantics (e.g. time-bin tokens in event sequences). `mc_timeline` supports bounding generation by **simulated elapsed time** rather than token count, using a two-layer approach:
+Some models generate sequences where tokens carry temporal semantics (e.g. time-bin tokens in event sequences). `quick_sco_re` supports bounding generation by **simulated elapsed time** rather than token count, using a two-layer approach:
 
 1. **Deferred logit processor** — a custom SGLang `CustomLogitProcessor` that is a complete no-op for the first `time_check_interval` tokens, then periodically checks accumulated simulated time via incremental summation. When the horizon is exceeded, it forces `trunc_id`, terminating generation. The deferred + periodic design avoids per-step throughput penalties.
 
@@ -175,7 +175,7 @@ This gives exact time-horizon semantics at near-baseline generation throughput.
 ## Repository Structure
 
 ```
-├── mc_timeline/              # Core package
+├── quick_sco_re/              # Core package
 │   ├── structures.py         # GenerationConfig, GeneratedTrajectory, ScoredTrajectory, PatientResults
 │   ├── generation.py         # Trajectory generation + DeferredTimeHorizonProcessor
 │   ├── scoring.py            # Prefill-only logprob extraction → SCOPE/REACH scores

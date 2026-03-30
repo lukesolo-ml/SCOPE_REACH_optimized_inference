@@ -1,10 +1,10 @@
-"""Unit tests for trajectory and score persistence in mc_timeline.io."""
+"""Unit tests for trajectory and score persistence in quick_sco_re.io."""
 
 import numpy as np
 import pytest
 
-from mc_timeline.io import save_scores, load_scores, save_trajectories, load_trajectories
-from mc_timeline.structures import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
+from quick_sco_re.io import save_scores, load_scores, save_trajectories, load_trajectories
+from quick_sco_re.structures import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
 
 
 # ---------------------------------------------------------------------------

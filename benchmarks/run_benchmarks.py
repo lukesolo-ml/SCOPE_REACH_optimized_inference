@@ -1,4 +1,4 @@
-"""Entry point for mc_timeline benchmarks.
+"""Entry point for quick_sco_re benchmarks.
 
 Replaces the monolithic run_tests.py with a clean dispatcher that delegates
 to focused benchmark modules.
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="mc_timeline benchmark runner",
+        description="quick_sco_re benchmark runner",
     )
     parser.add_argument(
         "--data_dir", type=pathlib.Path,
