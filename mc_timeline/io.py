@@ -32,7 +32,6 @@ def save_trajectories(
         - patient_idx, sample_idx: int arrays
         - traj_type: string array ("m1" / "m2")
         - prompt_len: int array
-        - has_timeline_end, has_target_event, was_time_truncated: bool arrays
         - truncation_idx: int array (-1 for None)
         - output_ids_flat: concatenated token IDs
         - output_ids_offsets: offsets into output_ids_flat for each trajectory
@@ -52,8 +51,6 @@ def save_trajectories(
     sample_idxs = []
     traj_types = []
     prompt_lens = []
-    has_timeline_ends = []
-    has_target_events = []
     was_time_truncateds = []
     truncation_idxs = []
     output_ids_flat = []
@@ -64,8 +61,6 @@ def save_trajectories(
         sample_idxs.append(traj.sample_idx)
         traj_types.append(traj.traj_type.value)
         prompt_lens.append(traj.prompt_len)
-        has_timeline_ends.append(traj.has_timeline_end)
-        has_target_events.append(traj.has_target_event)
         was_time_truncateds.append(traj.was_time_truncated)
         truncation_idxs.append(
             traj.truncation_idx if traj.truncation_idx is not None else -1
@@ -79,8 +74,6 @@ def save_trajectories(
         sample_idx=np.array(sample_idxs, dtype=np.int32),
         traj_type=np.array(traj_types, dtype="U2"),
         prompt_len=np.array(prompt_lens, dtype=np.int32),
-        has_timeline_end=np.array(has_timeline_ends, dtype=bool),
-        has_target_event=np.array(has_target_events, dtype=bool),
         was_time_truncated=np.array(was_time_truncateds, dtype=bool),
         truncation_idx=np.array(truncation_idxs, dtype=np.int32),
         output_ids_flat=np.array(output_ids_flat, dtype=np.int32),
