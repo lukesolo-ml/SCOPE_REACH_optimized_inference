@@ -1,6 +1,0 @@
-numpy
-sglang
-
-[dev]
-pytest
-pytest-asyncio
