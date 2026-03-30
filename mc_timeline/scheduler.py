@@ -31,7 +31,7 @@ from .structures import (
 
 logger = logging.getLogger(__name__)
 
-def create_engine(model_path, max_len, use_time_horizon = False):
+def create_engine(model_path, max_len, use_time_horizon = False, mem_fraction = 0.8):
     return sgl.Engine(
         model_path=model_path,
         skip_tokenizer_init=True,
@@ -41,7 +41,7 @@ def create_engine(model_path, max_len, use_time_horizon = False):
         attention_backend='flashinfer',
         disable_cuda_graph=True,
         sampling_backend="pytorch",
-        mem_fraction_static=0.40,
+        mem_fraction_static=mem_fraction,
         log_level='info',
     )
 
@@ -138,14 +138,14 @@ def aggregate_results(
     results = {i: PatientResults() for i in range(num_patients)}
 
     for st in scored_trajectories:
-            traj = st.trajectory
-            if traj.traj_type == TrajectoryType.M1:
-                results[traj.patient_idx].m0_samples.append(
-                    traj.timeline_terminating_id == target_event_id
-                )
-                results[traj.patient_idx].m1_samples.append(st.score)
-            else:  
-                results[traj.patient_idx].m2_samples.append(st.score)
+        traj = st.trajectory
+        if traj.traj_type == TrajectoryType.M1:
+            results[traj.patient_idx].m0_samples.append(
+                traj.timeline_terminating_id == target_event_id
+            )
+            results[traj.patient_idx].m1_samples.append(st.score)
+        else:  
+            results[traj.patient_idx].m2_samples.append(st.score)
 
     return [results[i] for i in range(num_patients)]
 
@@ -153,7 +153,8 @@ async def generate_and_score(
     engine: sgl.Engine,
     config: GenerationConfig,
     patient_tokens: Sequence[list[int]],
-    target_token_id
+    target_token_id,
+    methods: list[str] = ["M1", "M2"]
 ) -> tuple[list[GeneratedTrajectory], list[PatientResults]]:
     """Generate and immediately score all trajectories.
 
@@ -171,7 +172,7 @@ async def generate_and_score(
     """
     total_start = time.time()
 
-    trajectories = await generate_trajectories(engine, config, patient_tokens)
+    trajectories = await generate_trajectories(engine, config, patient_tokens, methods)
     scored = await score_trajectories(engine, config, trajectories, patient_tokens)
     results = aggregate_results(scored, num_patients=len(patient_tokens), target_event_id=target_token_id)
 

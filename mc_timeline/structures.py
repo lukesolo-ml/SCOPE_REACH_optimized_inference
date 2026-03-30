@@ -89,7 +89,7 @@ class GeneratedTrajectory:
     traj_type: TrajectoryType
     prompt_len: int
     output_ids: list[int]
-    timeline_terminating_id: int
+    timeline_terminating_id: int | None
     was_time_truncated: bool = False
     truncation_idx: int | None = None
 
