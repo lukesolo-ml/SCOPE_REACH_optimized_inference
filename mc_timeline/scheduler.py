@@ -41,6 +41,8 @@ def create_engine(model_path, max_len, use_time_horizon = False):
         attention_backend='flashinfer',
         disable_cuda_graph=True,
         sampling_backend="pytorch",
+        mem_fraction_static=0.40,
+        log_level='info',
     )
 
 async def generate_trajectories(

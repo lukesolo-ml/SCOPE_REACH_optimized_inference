@@ -35,7 +35,6 @@ async def run(model_path, vocab, trunc_id, max_len, n_samp, time_check_interval,
     stratified_resample_auc(
         outcome=outcome,
         estimators={"M0": metrics["M0"], "M1": metrics["M1"], "M2": metrics["M2"]},
-        gen_lengths=metrics["gen_lengths"],
         half_n=resample_size // 2,
         n_resamples=n_resamples,
         logger=logger,
