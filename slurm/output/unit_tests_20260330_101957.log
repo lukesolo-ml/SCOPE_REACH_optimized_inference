@@ -1,0 +1,6 @@
+ImportError while loading conftest '/home/lsolo/sr_package/tests/conftest.py'.
+../tests/conftest.py:5: in <module>
+    from mc_timeline.structures import (
+../mc_timeline/__init__.py:32: in <module>
+    from .scheduler import (
+E   ImportError: cannot import name 'generate_and_score_interleaved' from 'mc_timeline.scheduler' (/home/lsolo/sr_package/mc_timeline/scheduler.py)
