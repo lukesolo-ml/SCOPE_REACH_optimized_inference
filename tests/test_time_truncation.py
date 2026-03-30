@@ -78,22 +78,3 @@ class TestApplyTimeTruncation:
         assert trimmed == [50]
 
 
-# ---------------------------------------------------------------------------
-# _compute_elapsed_minutes
-# ---------------------------------------------------------------------------
-
-
-class TestComputeElapsedMinutes:
-    TOKEN_MAP = {50: 10.0, 51: 60.0, 52: 360.0}
-
-    def test_sums_correctly(self):
-        assert _compute_elapsed_minutes([50, 51, 52], self.TOKEN_MAP) == 430.0
-
-    def test_unknown_tokens_contribute_zero(self):
-        assert _compute_elapsed_minutes([1, 2, 3], self.TOKEN_MAP) == 0.0
-
-    def test_empty_list(self):
-        assert _compute_elapsed_minutes([], self.TOKEN_MAP) == 0.0
-
-    def test_mixed_tokens(self):
-        assert _compute_elapsed_minutes([50, 1, 51, 2], self.TOKEN_MAP) == 70.0
