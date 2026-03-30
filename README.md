@@ -42,6 +42,8 @@ The pipeline has two phases, both served through a single SGLang engine:
 
 **2. Scoring** — Each trajectory is scored in a separate **prefill-only forward pass**: the full sequence (prompt + generated tokens) is fed back through the model, requesting only the logprob of the target event token at each generated position. The per-position probabilities are then aggregated into the SCOPE or REACH score. This two-pass design decouples generation throughput from logprob extraction.
 
+**Persistence** — Trajectories can be saved to disk and loaded back for deferred scoring. The IO roundtrip is validated end-to-end: scores computed from reloaded trajectories are identical to those computed from the original generation results.
+
 ---
 
 ## Install
@@ -155,7 +157,7 @@ This gives exact time-horizon semantics at near-baseline generation throughput.
 
 | Function | Description |
 |:---|:---|
-| `generate_and_score(engine, config, input_sequences, target_token_id)` | Generate all trajectories, then score them. Keeps radix cache warm for the scoring pass. |
+| `generate_and_score(engine, config, input_sequences, target_token_id)` | Generate all trajectories, then score them. |
 | `generate_trajectories(engine, config, input_sequences)` | Generation only. Returns `list[GeneratedTrajectory]`. |
 | `score_trajectories(engine, config, trajectories, input_sequences)` | Scoring only. Takes previously generated trajectories and returns `list[ScoredTrajectory]`. |
 | `aggregate_results(scored_trajectories, num_inputs, target_event_id)` | Aggregates scored trajectories into per-input `PatientResults` (M0, M1, M2 sample lists). |
@@ -178,7 +180,7 @@ This gives exact time-horizon semantics at near-baseline generation throughput.
 │   ├── structures.py         # GenerationConfig, GeneratedTrajectory, ScoredTrajectory, PatientResults
 │   ├── generation.py         # Trajectory generation + DeferredTimeHorizonProcessor
 │   ├── scoring.py            # Prefill-only logprob extraction → SCOPE/REACH scores
-│   ├── scheduler.py          # Orchestration (sequential, interleaved, generate-only, score-only)
+│   ├── scheduler.py          # Orchestration (generate-and-score, generate-only, score-only)
 │   ├── io.py                 # Save/load trajectories and scores (.npz)
 │   └── diagnostics.py        # Trajectory length, termination, and truncation logging
 ├── benchmarks/               # End-to-end benchmarks (requires GPU + model + data)
@@ -189,7 +191,7 @@ This gives exact time-horizon semantics at near-baseline generation throughput.
 │   ├── bench_time_horizon.py # SCOPE/REACH with time-based stopping
 │   ├── bench_comparison.py   # Side-by-side timing & AUC comparison
 │   ├── bench_truncation.py   # Post-hoc vs. online truncation equivalence
-│   └── bench_interleave.py   # Sequential vs. interleaved comparison
+│   └── bench_io_roundtrip.py # Validates save/load roundtrip produces identical scores
 ├── tests/                    # Unit tests (no GPU required)
 ├── slurm/                    # HPC job scripts
 └── pyproject.toml
