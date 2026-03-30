@@ -12,5 +12,8 @@ dependencies = [
     "sglang",
 ]
 
+[tool.setuptools]
+packages = ["quick_sco_re"]
+
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
