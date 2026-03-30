@@ -1,8 +1,8 @@
-"""Shared fixtures for mc_timeline unit tests."""
+"""Shared fixtures for quick_sco_re unit tests."""
 
 import pytest
 
-from mc_timeline.structures import (
+from quick_sco_re.structures import (
     GeneratedTrajectory,
     GenerationConfig,
     PatientResults,

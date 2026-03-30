@@ -1,8 +1,8 @@
-"""Unit tests for time-based truncation logic in mc_timeline.generation."""
+"""Unit tests for time-based truncation logic in quick_sco_re.generation."""
 
 import pytest
 
-from mc_timeline.generation import apply_time_truncation
+from quick_sco_re.generation import apply_time_truncation
 
 
 # ---------------------------------------------------------------------------

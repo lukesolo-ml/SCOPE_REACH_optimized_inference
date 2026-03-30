@@ -1,11 +1,11 @@
-"""Unit tests for scoring logic in mc_timeline.scoring."""
+"""Unit tests for scoring logic in quick_sco_re.scoring."""
 
 import math
 
 import numpy as np
 import pytest
 
-from mc_timeline.scoring import _extract_token_logprobs
+from quick_sco_re.scoring import _extract_token_logprobs
 
 
 # ---------------------------------------------------------------------------

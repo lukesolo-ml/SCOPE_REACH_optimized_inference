@@ -1,4 +1,4 @@
-"""Shared utilities for mc_timeline benchmarks.
+"""Shared utilities for quick_sco_re benchmarks.
 
 Consolidates config building, phase running, metric computation, and
 comparison table logging that were duplicated across 5 mode runners
@@ -19,7 +19,7 @@ from sklearn.metrics import roc_auc_score
 
 import sglang as sgl
 
-from mc_timeline import (
+from quick_sco_re import (
     GenerationConfig,
     generate_and_score,
     generate_trajectories,
@@ -27,7 +27,7 @@ from mc_timeline import (
     aggregate_results,
     create_engine,
 )
-from mc_timeline.diagnostics import log_trajectory_diagnostics
+from quick_sco_re.diagnostics import log_trajectory_diagnostics
 
 
 logger = logging.getLogger(__name__)

@@ -1,9 +1,9 @@
-"""Unit tests for trajectory generation helpers in mc_timeline.generation."""
+"""Unit tests for trajectory generation helpers in quick_sco_re.generation."""
 
 import pytest
 import torch
 
-from mc_timeline.generation import DeferredTimeHorizonProcessor
+from quick_sco_re.generation import DeferredTimeHorizonProcessor
 
 
 # ---------------------------------------------------------------------------

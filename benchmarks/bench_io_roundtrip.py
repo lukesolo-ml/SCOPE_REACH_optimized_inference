@@ -3,7 +3,7 @@
 Workflow:
   1. Generate trajectories for the patient cohort.
   2. Score the trajectories directly (from generation results).
-  3. Save trajectories to disk via mc_timeline.io.
+  3. Save trajectories to disk via quick_sco_re.io.
   4. Load trajectories back from disk.
   5. Score the loaded trajectories.
   6. Compare aggregated per-patient scores — they must be identical.
@@ -13,7 +13,7 @@ import tempfile
 
 import numpy as np
 
-from mc_timeline import (
+from quick_sco_re import (
     save_trajectories,
     load_trajectories,
     score_trajectories,

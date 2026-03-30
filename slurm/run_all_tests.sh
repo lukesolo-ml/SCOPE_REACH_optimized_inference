@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run mc_timeline unit tests and benchmarks, logging output to slurm/output/
+# Run quick_sco_re unit tests and benchmarks, logging output to slurm/output/
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "${OUTPUT_DIR}/${TIMESTAMP}"
 
-echo "=== mc_timeline test run: ${TIMESTAMP} ==="
+echo "=== quick_sco_re test run: ${TIMESTAMP} ==="
 echo "Output directory: ${OUTPUT_DIR}"
 
 # ---------------------------------------------------------------------------
