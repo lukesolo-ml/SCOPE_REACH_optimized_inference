@@ -32,7 +32,7 @@ class GenerationConfig:
         max_len: Maximum total sequence length (prompt + generation).
         n_samp: Number of Monte Carlo samples per patient per trajectory type.
         target_event_id: Token ID of the target event (e.g., DSCG_Expired).
-        timeline_end_id: Token ID marking the end of a timeline.
+        end_token_ids: Token IDs that signal the end of a timeline
         suppressed_ids: Token IDs to suppress via logit bias (e.g., PAD, TRUNC).
             These tokens receive a large negative logit bias during generation.
         temperature: Sampling temperature. Default 1.0 for proper MC estimation.
@@ -72,8 +72,7 @@ class GeneratedTrajectory:
         traj_type: Whether this is an M1 or M2 trajectory.
         prompt_len: Number of tokens in the prompt (for offset calculations).
         output_ids: Generated token IDs (excluding prompt).
-        has_timeline_end: Whether the timeline end token appeared.
-        has_target_event: Whether the target event token appeared.
+        timeline_terminating_id: The ID of the token that triggered the end of the timeline
         was_time_truncated: Whether the time horizon fired (trunc_id was forced
             by the logit processor, or post-hoc truncation was applied). When
             True, output_ids has already been trimmed to exclude the time token
