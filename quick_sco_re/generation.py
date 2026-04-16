@@ -37,7 +37,11 @@ Requirements when using time-based stopping:
       TODO: This isn't particularly robust since not every vocab will have such an id
 """
 
+import atexit
 import collections
+import os
+import shutil
+import tempfile
 import uuid
 
 import numpy as np
@@ -121,23 +125,106 @@ class DeferredTimeHorizonProcessor(CustomLogitProcessor):
 
 
 # ---------------------------------------------------------------------------
-# Module-level result store for inline SCOPE/REACH (Option A from plan)
+# Result channel for inline SCOPE/REACH
 # ---------------------------------------------------------------------------
+#
+# Two channels are supported:
+#
+#   1. **Filesystem** (authoritative for the live engine). SGLang runs the
+#      custom logit processor in a scheduler subprocess, so module-level dict
+#      mutations in the subprocess don't reach the client. The processor
+#      writes per-request .npz files into a tmpdir whose path is passed
+#      through custom_params; the client reads/unlinks them after generation.
+#
+#   2. **In-memory dict** (fallback used by unit tests). When _sr_result_dir
+#      is absent from param_dict (direct-call tests that don't go through the
+#      engine), the processor writes to this dict instead.
 
 _RESULTS_MAX_SIZE = 10_000
 
 _RESULTS: collections.OrderedDict[str, dict] = collections.OrderedDict()
 
+_RESULT_DIR: str | None = None
+
+
+def _get_result_dir() -> str:
+    """Lazily create (and register for cleanup) a tmpdir for result files."""
+    global _RESULT_DIR
+    if _RESULT_DIR is None:
+        _RESULT_DIR = tempfile.mkdtemp(prefix="scope_reach_inline_")
+        atexit.register(_cleanup_result_dir)
+    return _RESULT_DIR
+
+
+def _cleanup_result_dir() -> None:
+    global _RESULT_DIR
+    if _RESULT_DIR and os.path.isdir(_RESULT_DIR):
+        shutil.rmtree(_RESULT_DIR, ignore_errors=True)
+    _RESULT_DIR = None
+
 
 def _store_result(request_id: str, data: dict) -> None:
-    """Store inline SCOPE/REACH result, evicting oldest if over capacity."""
+    """Store inline SCOPE/REACH result in-memory (fallback, tests only)."""
     _RESULTS[request_id] = data
     while len(_RESULTS) > _RESULTS_MAX_SIZE:
         _RESULTS.popitem(last=False)
 
 
-def pop_inline_result(request_id: str) -> dict | None:
-    """Pop and return inline SCOPE/REACH result for a completed request."""
+def _write_result_file(result_dir: str, request_id: str, data: dict) -> None:
+    """Atomically write a result .npz file (tmp + rename)."""
+    final_path = os.path.join(result_dir, f"{request_id}.npz")
+    tmp_path = os.path.join(result_dir, f"{request_id}.{os.getpid()}.tmp")
+    try:
+        np.savez(
+            tmp_path,
+            scope=data["scope"],
+            reach=data["reach"],
+            occurred_flag=data["occurred_flag"],
+            occurred_index=data["occurred_index"],
+        )
+        os.replace(tmp_path, final_path)
+    except OSError:
+        # Best-effort: if write fails, client will see None and log a warning
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _read_result_file(result_dir: str, request_id: str) -> dict | None:
+    """Read and unlink a result .npz file; return None if missing/corrupt."""
+    path = os.path.join(result_dir, f"{request_id}.npz")
+    if not os.path.exists(path):
+        return None
+    try:
+        with np.load(path) as data:
+            result = {
+                "scope": data["scope"].copy(),
+                "reach": data["reach"].copy(),
+                "occurred_flag": data["occurred_flag"].copy(),
+                "occurred_index": data["occurred_index"].copy(),
+            }
+    except (OSError, EOFError, ValueError):
+        return None
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return result
+
+
+def pop_inline_result(request_id: str, result_dir: str | None = None) -> dict | None:
+    """Pop and return inline SCOPE/REACH result for a completed request.
+
+    If result_dir is provided, checks the filesystem channel first. Falls back
+    to the in-memory _RESULTS dict (populated by direct-call unit tests).
+    """
+    if result_dir is not None:
+        file_result = _read_result_file(result_dir, request_id)
+        if file_result is not None:
+            return file_result
     return _RESULTS.pop(request_id, None)
 
 
@@ -181,6 +268,7 @@ class InlineScopeReachProcessor(CustomLogitProcessor):
                 continue
 
             request_id = param_dict.get("request_id")
+            result_dir = param_dict.get("_sr_result_dir")
 
             # --- Lazy initialization ---
             if "_sr_cursor" not in param_dict:
@@ -217,12 +305,16 @@ class InlineScopeReachProcessor(CustomLogitProcessor):
             # --- Early exit if all tracked tokens have occurred ---
             if occurred_flag.all():
                 if request_id is not None:
-                    _store_result(request_id, {
+                    payload = {
                         "scope": scope.copy(),
                         "reach": reach.copy(),
                         "occurred_flag": occurred_flag.copy(),
                         "occurred_index": occurred_index.copy(),
-                    })
+                    }
+                    if result_dir is not None:
+                        _write_result_file(result_dir, request_id, payload)
+                    else:
+                        _store_result(request_id, payload)
                 continue
 
             # --- Step 2: Compute probabilities for current step ---
@@ -240,12 +332,16 @@ class InlineScopeReachProcessor(CustomLogitProcessor):
 
             # --- Step 4: Store result for retrieval ---
             if request_id is not None:
-                _store_result(request_id, {
+                payload = {
                     "scope": scope.copy(),
                     "reach": reach.copy(),
                     "occurred_flag": occurred_flag.copy(),
                     "occurred_index": occurred_index.copy(),
-                })
+                }
+                if result_dir is not None:
+                    _write_result_file(result_dir, request_id, payload)
+                else:
+                    _store_result(request_id, payload)
 
         return logits
 
@@ -404,6 +500,7 @@ async def generate_trajectory(
         custom_params.update({
             "tracked_ids": config.tracked_ids,
             "request_id": request_id,
+            "_sr_result_dir": _get_result_dir(),
         })
         if config.tracked_name is not None:
             custom_params["tracked_name"] = config.tracked_name
@@ -453,7 +550,7 @@ async def generate_trajectory(
     inline_tracked_name = None
 
     if use_inline_sr and request_id is not None:
-        sr_result = pop_inline_result(request_id)
+        sr_result = pop_inline_result(request_id, result_dir=_get_result_dir())
         if sr_result is not None:
             scope_estimates = sr_result["scope"]
             reach_estimates = sr_result["reach"]
