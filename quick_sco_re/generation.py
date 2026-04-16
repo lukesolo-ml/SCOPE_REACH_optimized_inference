@@ -37,7 +37,12 @@ Requirements when using time-based stopping:
       TODO: This isn't particularly robust since not every vocab will have such an id
 """
 
+import collections
+import uuid
+
+import numpy as np
 import sglang as sgl
+import torch
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
 from .structures import GeneratedTrajectory, GenerationConfig, TrajectoryType
@@ -115,6 +120,166 @@ class DeferredTimeHorizonProcessor(CustomLogitProcessor):
         return logits
 
 
+# ---------------------------------------------------------------------------
+# Module-level result store for inline SCOPE/REACH (Option A from plan)
+# ---------------------------------------------------------------------------
+
+_RESULTS_MAX_SIZE = 10_000
+
+_RESULTS: collections.OrderedDict[str, dict] = collections.OrderedDict()
+
+
+def _store_result(request_id: str, data: dict) -> None:
+    """Store inline SCOPE/REACH result, evicting oldest if over capacity."""
+    _RESULTS[request_id] = data
+    while len(_RESULTS) > _RESULTS_MAX_SIZE:
+        _RESULTS.popitem(last=False)
+
+
+def pop_inline_result(request_id: str) -> dict | None:
+    """Pop and return inline SCOPE/REACH result for a completed request."""
+    return _RESULTS.pop(request_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Inline SCOPE/REACH logit processor
+# ---------------------------------------------------------------------------
+
+
+class InlineScopeReachProcessor(CustomLogitProcessor):
+    """Compute SCOPE and REACH estimates inline during generation.
+
+    Observational only — returns logits unmodified.
+
+    custom_params (passed per request) must contain:
+        tracked_ids  : list[int] — vocab token IDs to estimate
+        request_id   : str       — unique ID for result retrieval
+
+    Optional:
+        tracked_name : str       — label for downstream keying
+
+    The processor lazily allocates per-request state on first call:
+        _sr_tracked_set   : set[int]
+        _sr_id_to_idx     : dict[int, int]
+        _sr_occurred_flag : np.ndarray[bool]   shape (K,)
+        _sr_occurred_index: np.ndarray[int64]  shape (K,)
+        _sr_scope         : np.ndarray[float64] shape (K,)
+        _sr_reach         : np.ndarray[float64] shape (K,)
+        _sr_cursor        : int
+
+    Requires disable_overlap_schedule=True on the SGLang engine.
+    """
+
+    def __call__(self, logits, custom_param_list):
+        for i, param_dict in enumerate(custom_param_list):
+            req = param_dict.get("__req__")
+            if req is None:
+                continue
+
+            tracked_ids = param_dict.get("tracked_ids")
+            if tracked_ids is None:
+                continue
+
+            request_id = param_dict.get("request_id")
+
+            # --- Lazy initialization ---
+            if "_sr_cursor" not in param_dict:
+                K = len(tracked_ids)
+                param_dict["_sr_tracked_set"] = set(tracked_ids)
+                param_dict["_sr_id_to_idx"] = {tid: idx for idx, tid in enumerate(tracked_ids)}
+                param_dict["_sr_occurred_flag"] = np.zeros(K, dtype=bool)
+                param_dict["_sr_occurred_index"] = np.full(K, -1, dtype=np.int64)
+                param_dict["_sr_scope"] = np.zeros(K, dtype=np.float64)
+                param_dict["_sr_reach"] = np.zeros(K, dtype=np.float64)
+                param_dict["_sr_cursor"] = 0
+
+            tracked_set = param_dict["_sr_tracked_set"]
+            id_to_idx = param_dict["_sr_id_to_idx"]
+            occurred_flag = param_dict["_sr_occurred_flag"]
+            occurred_index = param_dict["_sr_occurred_index"]
+            scope = param_dict["_sr_scope"]
+            reach = param_dict["_sr_reach"]
+            cursor = param_dict["_sr_cursor"]
+
+            n_generated = len(req.output_ids)
+
+            # --- Step 1: Advance cursor, flip occurred flags ---
+            for j in range(cursor, n_generated):
+                tid = int(req.output_ids[j])
+                if tid in tracked_set:
+                    k = id_to_idx[tid]
+                    if not occurred_flag[k]:
+                        occurred_flag[k] = True
+                        occurred_index[k] = j
+
+            param_dict["_sr_cursor"] = n_generated
+
+            # --- Early exit if all tracked tokens have occurred ---
+            if occurred_flag.all():
+                if request_id is not None:
+                    _store_result(request_id, {
+                        "scope": scope.copy(),
+                        "reach": reach.copy(),
+                        "occurred_flag": occurred_flag.copy(),
+                        "occurred_index": occurred_index.copy(),
+                    })
+                continue
+
+            # --- Step 2: Compute probabilities for current step ---
+            # Use logsumexp + gather for efficiency (avoids full-vocab softmax alloc)
+            logits_i = logits[i].float()
+            log_Z = torch.logsumexp(logits_i, dim=-1)
+            tracked_ids_tensor = torch.tensor(tracked_ids, device=logits.device, dtype=torch.long)
+            log_p_tracked = logits_i[tracked_ids_tensor] - log_Z
+            p_tracked = log_p_tracked.exp().cpu().numpy().astype(np.float64)
+
+            # --- Step 3: Update SCOPE and REACH for non-occurred tokens ---
+            mask = ~occurred_flag
+            scope[mask] += p_tracked[mask]
+            reach[mask] = 1.0 - (1.0 - reach[mask]) * (1.0 - p_tracked[mask])
+
+            # --- Step 4: Store result for retrieval ---
+            if request_id is not None:
+                _store_result(request_id, {
+                    "scope": scope.copy(),
+                    "reach": reach.copy(),
+                    "occurred_flag": occurred_flag.copy(),
+                    "occurred_index": occurred_index.copy(),
+                })
+
+        return logits
+
+
+# ---------------------------------------------------------------------------
+# Chained processor (composes time-horizon + inline SCOPE/REACH)
+# ---------------------------------------------------------------------------
+
+
+class ChainedProcessor(CustomLogitProcessor):
+    """Dispatches to time-horizon and/or inline SCOPE/REACH processors.
+
+    Checks which keys are present in custom_params and runs the appropriate
+    sub-processors. This allows a single custom_logit_processor per request
+    while supporting both features independently or together.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._time_horizon = DeferredTimeHorizonProcessor()
+        self._scope_reach = InlineScopeReachProcessor()
+
+    def __call__(self, logits, custom_param_list):
+        # Time-horizon processor may modify logits (force trunc_id)
+        has_time = any("time_horizon" in p for p in custom_param_list)
+        has_sr = any("tracked_ids" in p for p in custom_param_list)
+
+        if has_time:
+            logits = self._time_horizon(logits, custom_param_list)
+        if has_sr:
+            logits = self._scope_reach(logits, custom_param_list)
+
+        return logits
+
 
 # Serialized once at module level and reused across all generate_trajectory calls.
 _LOGIT_PROCESSOR_STR: str | None = None
@@ -123,7 +288,7 @@ _LOGIT_PROCESSOR_STR: str | None = None
 def _get_logit_processor_str() -> str:
     global _LOGIT_PROCESSOR_STR
     if _LOGIT_PROCESSOR_STR is None:
-        _LOGIT_PROCESSOR_STR = DeferredTimeHorizonProcessor().to_str()
+        _LOGIT_PROCESSOR_STR = ChainedProcessor().to_str()
     return _LOGIT_PROCESSOR_STR
 
 
@@ -196,6 +361,8 @@ async def generate_trajectory(
     """
     max_new = config.max_len - len(prompt_tokens) - 1
     use_time_stopping = config.max_time is not None and config.trunc_id is not None
+    use_inline_sr = config.tracked_ids is not None
+    use_processor = use_time_stopping or use_inline_sr
 
     # Build logit bias from suppressed_ids.  When time-based stopping is active,
     # auto-exclude trunc_id so the logit processor can force it.
@@ -220,13 +387,29 @@ async def generate_trajectory(
 
     extra_kwargs: dict = {"return_logprob": False}
 
+    # --- Custom params for logit processor(s) ---
+    request_id: str | None = None
+    custom_params: dict = {}
+
     if use_time_stopping:
-        sampling_params["custom_params"] = {
+        custom_params.update({
             "time_horizon": config.max_time,
             "trunc_id": config.trunc_id,
             "time_token_map": config.token_id_to_minutes,
             "check_interval": config.time_check_interval,
-        }
+        })
+
+    if use_inline_sr:
+        request_id = str(uuid.uuid4())
+        custom_params.update({
+            "tracked_ids": config.tracked_ids,
+            "request_id": request_id,
+        })
+        if config.tracked_name is not None:
+            custom_params["tracked_name"] = config.tracked_name
+
+    if use_processor:
+        sampling_params["custom_params"] = custom_params
         extra_kwargs["custom_logit_processor"] = _get_logit_processor_str()
 
     output = await engine.async_generate(
@@ -261,6 +444,24 @@ async def generate_trajectory(
             config.max_time,
         )
 
+    # --- Retrieve inline SCOPE/REACH results ---
+    scope_estimates = None
+    reach_estimates = None
+    occurred_flag = None
+    occurred_index = None
+    inline_tracked_ids = None
+    inline_tracked_name = None
+
+    if use_inline_sr and request_id is not None:
+        sr_result = pop_inline_result(request_id)
+        if sr_result is not None:
+            scope_estimates = sr_result["scope"]
+            reach_estimates = sr_result["reach"]
+            occurred_flag = sr_result["occurred_flag"]
+            occurred_index = sr_result["occurred_index"]
+        inline_tracked_ids = list(config.tracked_ids)
+        inline_tracked_name = config.tracked_name
+
     return GeneratedTrajectory(
         patient_idx=patient_idx,
         sample_idx=sample_idx,
@@ -270,4 +471,10 @@ async def generate_trajectory(
         timeline_terminating_id=terminal_token_id,
         was_time_truncated=was_time_truncated,
         truncation_idx=truncation_idx,
+        scope_estimates=scope_estimates,
+        reach_estimates=reach_estimates,
+        occurred_flag=occurred_flag,
+        occurred_index=occurred_index,
+        inline_tracked_ids=inline_tracked_ids,
+        inline_tracked_name=inline_tracked_name,
     )
