@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import numpy as np
+
 
 class TrajectoryType(Enum):
     """Type of trajectory generation strategy.
@@ -47,7 +49,12 @@ class GenerationConfig:
             trunc_id) once the sum of token_id_to_minutes values in the generated
             output meets or exceeds this threshold. Requires trunc_id to be set.
         time_check_interval: Number of tokens to generate before checking
-            elapsed time. 
+            elapsed time.
+        tracked_ids: Vocabulary token IDs to compute inline SCOPE/REACH
+            estimates for during generation. When set, the inline processor
+            computes per-token SCOPE and REACH without a second scoring pass.
+        tracked_name: Optional label for the tracked token set (for downstream
+            keying / display).
     """
 
     max_len: int
@@ -60,6 +67,8 @@ class GenerationConfig:
     token_id_to_minutes: dict[int, float] = field(default_factory=dict)
     max_time: float | None = None
     time_check_interval: int = 100
+    tracked_ids: list[int] | None = None
+    tracked_name: str | None = None
 
 
 @dataclass
@@ -82,6 +91,12 @@ class GeneratedTrajectory:
         truncation_idx: When was_time_truncated is True, the index in the
             *original* (pre-trim) output_ids at which the offending time token
             appeared. None otherwise. Useful for diagnostics.
+        scope_estimates: Inline SCOPE estimates per tracked token (shape K).
+        reach_estimates: Inline REACH estimates per tracked token (shape K).
+        occurred_flag: Whether each tracked token occurred (shape K).
+        occurred_index: First-occurrence index per tracked token (-1 if none).
+        inline_tracked_ids: Echo of tracked_ids used during generation.
+        inline_tracked_name: Echo of tracked_name used during generation.
     """
 
     patient_idx: int
@@ -92,6 +107,12 @@ class GeneratedTrajectory:
     timeline_terminating_id: int | None
     was_time_truncated: bool = False
     truncation_idx: int | None = None
+    scope_estimates: np.ndarray | None = None
+    reach_estimates: np.ndarray | None = None
+    occurred_flag: np.ndarray | None = None
+    occurred_index: np.ndarray | None = None
+    inline_tracked_ids: list[int] | None = None
+    inline_tracked_name: str | None = None
 
 
 @dataclass
