@@ -2,11 +2,11 @@
 Trajectory generation for SCOPE/REACH risk prediction.
 
 Generates M1 (target-event-allowed) and M2 (target-event-forbidden) trajectories
-using an SGLang engine. Generation is done without logprobs for speed; scoring
-is handled separately.
+using an SGLang engine.
 
-TODO: Double check simultaneous generation and scoring. It is currently much slower under all configs
-NOTE: Simultaneous generation and scoring is currently not recommended.
+When config.tracked_ids is set, SCOPE/REACH estimates are computed inline by
+requesting token_ids_logprob during generation and accumulating the returned
+per-step probabilities. No second forward pass is needed.
 
 Time-based stopping
 -------------------
@@ -37,16 +37,8 @@ Requirements when using time-based stopping:
       TODO: This isn't particularly robust since not every vocab will have such an id
 """
 
-import atexit
-import collections
-import os
-import shutil
-import tempfile
-import uuid
-
 import numpy as np
 import sglang as sgl
-import torch
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
 from .structures import GeneratedTrajectory, GenerationConfig, TrajectoryType
@@ -124,259 +116,6 @@ class DeferredTimeHorizonProcessor(CustomLogitProcessor):
         return logits
 
 
-# ---------------------------------------------------------------------------
-# Result channel for inline SCOPE/REACH
-# ---------------------------------------------------------------------------
-#
-# Two channels are supported:
-#
-#   1. **Filesystem** (authoritative for the live engine). SGLang runs the
-#      custom logit processor in a scheduler subprocess, so module-level dict
-#      mutations in the subprocess don't reach the client. The processor
-#      writes per-request .npz files into a tmpdir whose path is passed
-#      through custom_params; the client reads/unlinks them after generation.
-#
-#   2. **In-memory dict** (fallback used by unit tests). When _sr_result_dir
-#      is absent from param_dict (direct-call tests that don't go through the
-#      engine), the processor writes to this dict instead.
-
-_RESULTS_MAX_SIZE = 10_000
-
-_RESULTS: collections.OrderedDict[str, dict] = collections.OrderedDict()
-
-_RESULT_DIR: str | None = None
-
-
-def _get_result_dir() -> str:
-    """Lazily create (and register for cleanup) a tmpdir for result files."""
-    global _RESULT_DIR
-    if _RESULT_DIR is None:
-        _RESULT_DIR = tempfile.mkdtemp(prefix="scope_reach_inline_")
-        atexit.register(_cleanup_result_dir)
-    return _RESULT_DIR
-
-
-def _cleanup_result_dir() -> None:
-    global _RESULT_DIR
-    if _RESULT_DIR and os.path.isdir(_RESULT_DIR):
-        shutil.rmtree(_RESULT_DIR, ignore_errors=True)
-    _RESULT_DIR = None
-
-
-def _store_result(request_id: str, data: dict) -> None:
-    """Store inline SCOPE/REACH result in-memory (fallback, tests only)."""
-    _RESULTS[request_id] = data
-    while len(_RESULTS) > _RESULTS_MAX_SIZE:
-        _RESULTS.popitem(last=False)
-
-
-def _write_result_file(result_dir: str, request_id: str, data: dict) -> None:
-    """Atomically write a result .npz file (tmp + rename)."""
-    final_path = os.path.join(result_dir, f"{request_id}.npz")
-    tmp_path = os.path.join(result_dir, f"{request_id}.{os.getpid()}.tmp")
-    try:
-        np.savez(
-            tmp_path,
-            scope=data["scope"],
-            reach=data["reach"],
-            occurred_flag=data["occurred_flag"],
-            occurred_index=data["occurred_index"],
-        )
-        os.replace(tmp_path, final_path)
-    except OSError:
-        # Best-effort: if write fails, client will see None and log a warning
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
-def _read_result_file(result_dir: str, request_id: str) -> dict | None:
-    """Read and unlink a result .npz file; return None if missing/corrupt."""
-    path = os.path.join(result_dir, f"{request_id}.npz")
-    if not os.path.exists(path):
-        return None
-    try:
-        with np.load(path) as data:
-            result = {
-                "scope": data["scope"].copy(),
-                "reach": data["reach"].copy(),
-                "occurred_flag": data["occurred_flag"].copy(),
-                "occurred_index": data["occurred_index"].copy(),
-            }
-    except (OSError, EOFError, ValueError):
-        return None
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    return result
-
-
-def pop_inline_result(request_id: str, result_dir: str | None = None) -> dict | None:
-    """Pop and return inline SCOPE/REACH result for a completed request.
-
-    If result_dir is provided, checks the filesystem channel first. Falls back
-    to the in-memory _RESULTS dict (populated by direct-call unit tests).
-    """
-    if result_dir is not None:
-        file_result = _read_result_file(result_dir, request_id)
-        if file_result is not None:
-            return file_result
-    return _RESULTS.pop(request_id, None)
-
-
-# ---------------------------------------------------------------------------
-# Inline SCOPE/REACH logit processor
-# ---------------------------------------------------------------------------
-
-
-class InlineScopeReachProcessor(CustomLogitProcessor):
-    """Compute SCOPE and REACH estimates inline during generation.
-
-    Observational only — returns logits unmodified.
-
-    custom_params (passed per request) must contain:
-        tracked_ids  : list[int] — vocab token IDs to estimate
-        request_id   : str       — unique ID for result retrieval
-
-    Optional:
-        tracked_name : str       — label for downstream keying
-
-    The processor lazily allocates per-request state on first call:
-        _sr_tracked_set   : set[int]
-        _sr_id_to_idx     : dict[int, int]
-        _sr_occurred_flag : np.ndarray[bool]   shape (K,)
-        _sr_occurred_index: np.ndarray[int64]  shape (K,)
-        _sr_scope         : np.ndarray[float64] shape (K,)
-        _sr_reach         : np.ndarray[float64] shape (K,)
-        _sr_cursor        : int
-
-    Requires disable_overlap_schedule=True on the SGLang engine.
-    """
-
-    def __call__(self, logits, custom_param_list):
-        for i, param_dict in enumerate(custom_param_list):
-            req = param_dict.get("__req__")
-            if req is None:
-                continue
-
-            tracked_ids = param_dict.get("tracked_ids")
-            if tracked_ids is None:
-                continue
-
-            request_id = param_dict.get("request_id")
-            result_dir = param_dict.get("_sr_result_dir")
-
-            # --- Lazy initialization ---
-            if "_sr_cursor" not in param_dict:
-                K = len(tracked_ids)
-                param_dict["_sr_tracked_set"] = set(tracked_ids)
-                param_dict["_sr_id_to_idx"] = {tid: idx for idx, tid in enumerate(tracked_ids)}
-                param_dict["_sr_occurred_flag"] = np.zeros(K, dtype=bool)
-                param_dict["_sr_occurred_index"] = np.full(K, -1, dtype=np.int64)
-                param_dict["_sr_scope"] = np.zeros(K, dtype=np.float64)
-                param_dict["_sr_reach"] = np.zeros(K, dtype=np.float64)
-                param_dict["_sr_cursor"] = 0
-
-            tracked_set = param_dict["_sr_tracked_set"]
-            id_to_idx = param_dict["_sr_id_to_idx"]
-            occurred_flag = param_dict["_sr_occurred_flag"]
-            occurred_index = param_dict["_sr_occurred_index"]
-            scope = param_dict["_sr_scope"]
-            reach = param_dict["_sr_reach"]
-            cursor = param_dict["_sr_cursor"]
-
-            n_generated = len(req.output_ids)
-
-            # --- Step 1: Advance cursor, flip occurred flags ---
-            for j in range(cursor, n_generated):
-                tid = int(req.output_ids[j])
-                if tid in tracked_set:
-                    k = id_to_idx[tid]
-                    if not occurred_flag[k]:
-                        occurred_flag[k] = True
-                        occurred_index[k] = j
-
-            param_dict["_sr_cursor"] = n_generated
-
-            # --- Early exit if all tracked tokens have occurred ---
-            if occurred_flag.all():
-                if request_id is not None:
-                    payload = {
-                        "scope": scope.copy(),
-                        "reach": reach.copy(),
-                        "occurred_flag": occurred_flag.copy(),
-                        "occurred_index": occurred_index.copy(),
-                    }
-                    if result_dir is not None:
-                        _write_result_file(result_dir, request_id, payload)
-                    else:
-                        _store_result(request_id, payload)
-                continue
-
-            # --- Step 2: Compute probabilities for current step ---
-            # Use logsumexp + gather for efficiency (avoids full-vocab softmax alloc)
-            logits_i = logits[i].float()
-            log_Z = torch.logsumexp(logits_i, dim=-1)
-            tracked_ids_tensor = torch.tensor(tracked_ids, device=logits.device, dtype=torch.long)
-            log_p_tracked = logits_i[tracked_ids_tensor] - log_Z
-            p_tracked = log_p_tracked.exp().cpu().numpy().astype(np.float64)
-
-            # --- Step 3: Update SCOPE and REACH for non-occurred tokens ---
-            mask = ~occurred_flag
-            scope[mask] += p_tracked[mask]
-            reach[mask] = 1.0 - (1.0 - reach[mask]) * (1.0 - p_tracked[mask])
-
-            # --- Step 4: Store result for retrieval ---
-            if request_id is not None:
-                payload = {
-                    "scope": scope.copy(),
-                    "reach": reach.copy(),
-                    "occurred_flag": occurred_flag.copy(),
-                    "occurred_index": occurred_index.copy(),
-                }
-                if result_dir is not None:
-                    _write_result_file(result_dir, request_id, payload)
-                else:
-                    _store_result(request_id, payload)
-
-        return logits
-
-
-# ---------------------------------------------------------------------------
-# Chained processor (composes time-horizon + inline SCOPE/REACH)
-# ---------------------------------------------------------------------------
-
-
-class ChainedProcessor(CustomLogitProcessor):
-    """Dispatches to time-horizon and/or inline SCOPE/REACH processors.
-
-    Checks which keys are present in custom_params and runs the appropriate
-    sub-processors. This allows a single custom_logit_processor per request
-    while supporting both features independently or together.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._time_horizon = DeferredTimeHorizonProcessor()
-        self._scope_reach = InlineScopeReachProcessor()
-
-    def __call__(self, logits, custom_param_list):
-        # Time-horizon processor may modify logits (force trunc_id)
-        has_time = any("time_horizon" in p for p in custom_param_list)
-        has_sr = any("tracked_ids" in p for p in custom_param_list)
-
-        if has_time:
-            logits = self._time_horizon(logits, custom_param_list)
-        if has_sr:
-            logits = self._scope_reach(logits, custom_param_list)
-
-        return logits
-
-
 # Serialized once at module level and reused across all generate_trajectory calls.
 _LOGIT_PROCESSOR_STR: str | None = None
 
@@ -384,7 +123,7 @@ _LOGIT_PROCESSOR_STR: str | None = None
 def _get_logit_processor_str() -> str:
     global _LOGIT_PROCESSOR_STR
     if _LOGIT_PROCESSOR_STR is None:
-        _LOGIT_PROCESSOR_STR = ChainedProcessor().to_str()
+        _LOGIT_PROCESSOR_STR = DeferredTimeHorizonProcessor().to_str()
     return _LOGIT_PROCESSOR_STR
 
 
@@ -428,7 +167,7 @@ def apply_time_truncation(
     return output_ids, False, None
 
 # ---------------------------------------------------------------------------
-# Core generation function (logit processor path)
+# Core generation function
 # ---------------------------------------------------------------------------
 
 
@@ -440,7 +179,15 @@ async def generate_trajectory(
     sample_idx: int,
     traj_type: TrajectoryType,
 ) -> GeneratedTrajectory:
-    """Generate a single trajectory without logprobs.
+    """Generate a single trajectory, optionally with inline SCOPE/REACH estimates.
+
+    When config.tracked_ids is set, token_ids_logprob is used to extract
+    per-step probabilities for each tracked token during generation. SCOPE
+    (sum of probs) and REACH (1 - prod(1 - prob)) are accumulated up to and
+    including the step at which each tracked token first appears in output_ids.
+
+    When time-based stopping is active, output_ids are post-hoc trimmed to the
+    exact time horizon boundary after generation.
 
     Args:
         engine: SGLang inference engine.
@@ -451,14 +198,12 @@ async def generate_trajectory(
         traj_type: M1 (target event allowed) or M2 (target event forbidden).
 
     Returns:
-        A GeneratedTrajectory with the generated token IDs and metadata.
-        When time-based stopping is active, output_ids are post-hoc trimmed
-        to the exact time horizon boundary.
+        A GeneratedTrajectory with generated token IDs, metadata, and
+        (when config.tracked_ids is set) inline SCOPE/REACH estimates.
     """
     max_new = config.max_len - len(prompt_tokens) - 1
     use_time_stopping = config.max_time is not None and config.trunc_id is not None
     use_inline_sr = config.tracked_ids is not None
-    use_processor = use_time_stopping or use_inline_sr
 
     # Build logit bias from suppressed_ids.  When time-based stopping is active,
     # auto-exclude trunc_id so the logit processor can force it.
@@ -481,31 +226,18 @@ async def generate_trajectory(
         "logit_bias": logit_bias,
     }
 
-    extra_kwargs: dict = {"return_logprob": False}
+    extra_kwargs: dict = {"return_logprob": use_inline_sr}
 
-    # --- Custom params for logit processor(s) ---
-    request_id: str | None = None
-    custom_params: dict = {}
+    if use_inline_sr:
+        extra_kwargs["token_ids_logprob"] = list(config.tracked_ids)
 
     if use_time_stopping:
-        custom_params.update({
+        custom_params: dict = {
             "time_horizon": config.max_time,
             "trunc_id": config.trunc_id,
             "time_token_map": config.token_id_to_minutes,
             "check_interval": config.time_check_interval,
-        })
-
-    if use_inline_sr:
-        request_id = str(uuid.uuid4())
-        custom_params.update({
-            "tracked_ids": config.tracked_ids,
-            "request_id": request_id,
-            "_sr_result_dir": _get_result_dir(),
-        })
-        if config.tracked_name is not None:
-            custom_params["tracked_name"] = config.tracked_name
-
-    if use_processor:
+        }
         sampling_params["custom_params"] = custom_params
         extra_kwargs["custom_logit_processor"] = _get_logit_processor_str()
 
@@ -522,6 +254,7 @@ async def generate_trajectory(
     else:
         terminal_token_id = None
     output_ids = list(meta.get("output_ids", output.get("output_ids", [])))
+
     # --- Post-hoc exact truncation ---
     # The deferred processor may have overshot by up to check_interval tokens,
     # or may not have fired at all if the trajectory ended naturally but still
@@ -541,7 +274,7 @@ async def generate_trajectory(
             config.max_time,
         )
 
-    # --- Retrieve inline SCOPE/REACH results ---
+    # --- Compute inline SCOPE/REACH from token_ids_logprob ---
     scope_estimates = None
     reach_estimates = None
     occurred_flag = None
@@ -549,13 +282,42 @@ async def generate_trajectory(
     inline_tracked_ids = None
     inline_tracked_name = None
 
-    if use_inline_sr and request_id is not None:
-        sr_result = pop_inline_result(request_id, result_dir=_get_result_dir())
-        if sr_result is not None:
-            scope_estimates = sr_result["scope"]
-            reach_estimates = sr_result["reach"]
-            occurred_flag = sr_result["occurred_flag"]
-            occurred_index = sr_result["occurred_index"]
+    if use_inline_sr:
+        tracked_ids = config.tracked_ids
+        K = len(tracked_ids)
+        scope = np.zeros(K, dtype=np.float64)
+        reach = np.zeros(K, dtype=np.float64)
+        occ_flag = np.zeros(K, dtype=bool)
+        occ_index = np.full(K, -1, dtype=np.int64)
+
+        # Find first occurrence of each tracked id in output_ids
+        for j, tid in enumerate(output_ids):
+            for k, tracked_id in enumerate(tracked_ids):
+                if tid == tracked_id and not occ_flag[k]:
+                    occ_flag[k] = True
+                    occ_index[k] = j
+
+        # Accumulate scope/reach from per-step logprobs.
+        # output_token_ids_logprobs[t] gives P(tracked_id | tokens_0..t-1).
+        # Include positions up to and including the occurrence step (occ_index[k]).
+        output_token_ids_logprobs = meta.get("output_token_ids_logprobs", [])
+        for t, position_entry in enumerate(output_token_ids_logprobs):
+            if position_entry is None:
+                continue
+            for k, tracked_id in enumerate(tracked_ids):
+                if occ_flag[k] and t > occ_index[k]:
+                    continue
+                for logprob, token_id, _ in position_entry:
+                    if token_id == tracked_id:
+                        p = float(np.clip(np.exp(logprob), 0.0, 1.0))
+                        scope[k] += p
+                        reach[k] = 1.0 - (1.0 - reach[k]) * (1.0 - p)
+                        break
+
+        scope_estimates = scope
+        reach_estimates = reach
+        occurred_flag = occ_flag
+        occurred_index = occ_index
         inline_tracked_ids = list(config.tracked_ids)
         inline_tracked_name = config.tracked_name
 
@@ -574,4 +336,83 @@ async def generate_trajectory(
         occurred_index=occurred_index,
         inline_tracked_ids=inline_tracked_ids,
         inline_tracked_name=inline_tracked_name,
+        n_new_tokens=len(output_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# M2 derivation from M1 trajectories
+# ---------------------------------------------------------------------------
+
+
+async def generate_m2_from_m1_trajectory(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    m1_traj: GeneratedTrajectory,
+    prompt_tokens: list[int],
+) -> GeneratedTrajectory:
+    """Derive an M2 trajectory from a completed M1 trajectory.
+
+    For trajectories where the target event was not generated, the M1 output
+    is reused directly as an M2 trajectory (scored via score_trajectory).
+
+    For trajectories where the target event was generated, all tokens from
+    the event onwards are removed and the continuation is regenerated with
+    the target event suppressed. The resulting trajectory is then scored
+    using unbiased model probabilities (see score_trajectory in scoring.py).
+
+    Args:
+        engine: SGLang inference engine.
+        config: Generation configuration.
+        m1_traj: A completed M1 trajectory.
+        prompt_tokens: Original prompt tokens for this patient.
+
+    Returns:
+        An M2 GeneratedTrajectory derived from the M1 trajectory.
+    """
+    if m1_traj.timeline_terminating_id != config.target_event_id:
+        return GeneratedTrajectory(
+            patient_idx=m1_traj.patient_idx,
+            sample_idx=m1_traj.sample_idx,
+            traj_type=TrajectoryType.M2,
+            prompt_len=m1_traj.prompt_len,
+            output_ids=list(m1_traj.output_ids),
+            timeline_terminating_id=m1_traj.timeline_terminating_id,
+            was_time_truncated=m1_traj.was_time_truncated,
+            truncation_idx=m1_traj.truncation_idx,
+            n_new_tokens=0,
+        )
+
+    # Target event was generated: truncate before it and regenerate with suppression.
+    target_id = config.target_event_id
+    if target_id in m1_traj.output_ids:
+        cut = m1_traj.output_ids.index(target_id)
+        prefix_ids = m1_traj.output_ids[:cut]
+    else:
+        prefix_ids = list(m1_traj.output_ids)
+
+    continuation = await generate_trajectory(
+        engine=engine,
+        config=config,
+        prompt_tokens=prompt_tokens + prefix_ids,
+        patient_idx=m1_traj.patient_idx,
+        sample_idx=m1_traj.sample_idx,
+        traj_type=TrajectoryType.M2,
+    )
+
+    truncation_idx = (
+        None if continuation.truncation_idx is None
+        else len(prefix_ids) + continuation.truncation_idx
+    )
+
+    return GeneratedTrajectory(
+        patient_idx=m1_traj.patient_idx,
+        sample_idx=m1_traj.sample_idx,
+        traj_type=TrajectoryType.M2,
+        prompt_len=m1_traj.prompt_len,
+        output_ids=prefix_ids + continuation.output_ids,
+        timeline_terminating_id=continuation.timeline_terminating_id,
+        was_time_truncated=continuation.was_time_truncated,
+        truncation_idx=truncation_idx,
+        n_new_tokens=len(continuation.output_ids),
     )

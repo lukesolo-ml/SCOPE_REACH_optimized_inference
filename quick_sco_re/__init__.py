@@ -33,6 +33,7 @@ from .scheduler import (
     aggregate_results,
     generate_and_score,
     generate_trajectories,
+    generate_m2_from_m1_trajectories,
     score_trajectories,
     create_engine
 )
@@ -54,6 +55,7 @@ __all__ = [
     # Scheduler functions
     "generate_and_score",
     "generate_trajectories",
+    "generate_m2_from_m1_trajectories",
     "score_trajectories",
     "aggregate_results",
     "create_engine",

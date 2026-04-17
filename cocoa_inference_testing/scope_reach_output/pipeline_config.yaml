@@ -1,0 +1,80 @@
+cocoa_outputs:
+  held_out_for_inference: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed2/held_out_for_inference.parquet
+  tokenizer_yaml: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
+model_path: /mnt/bbj-lab/users/lsolo/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
+output_dir: ./scope_reach_output
+cohort:
+  max_patients: 100
+  shuffle_seed: 39
+  require_flag: null
+  exclude_flag: DSCG//expired_past
+generation:
+  max_len: 10000
+  n_samp: 10
+  temperature: 1.0
+  score_inline: true
+  methods:
+  - M1
+  - M2
+  target_event: DSCG//expired
+  end_tokens:
+    prefixes:
+    - DSCG
+    names: []
+  suppressed_tokens:
+  - BOS
+  time_stopping:
+    enabled: false
+    trunc_token: UNK
+    max_time_minutes: 1.44e+16
+    time_check_interval: 100
+    time_token_bounds:
+      TIME//5m-15m:
+      - 5
+      - 15
+      TIME//15m-1h:
+      - 15
+      - 60
+      TIME//1h-2h:
+      - 60
+      - 120
+      TIME//2h-6h:
+      - 120
+      - 360
+      TIME//6h-12h:
+      - 360
+      - 720
+      TIME//12h-1d:
+      - 720
+      - 1440
+      TIME//1d-3d:
+      - 1440
+      - 4320
+      TIME//3d-1w:
+      - 4320
+      - 10080
+      TIME//1w-2w:
+      - 10080
+      - 20160
+      TIME//2w-1mt:
+      - 20160
+      - 43200
+      TIME//1mt-3mt:
+      - 43200
+      - 129600
+      TIME//3mt-6mt:
+      - 129600
+      - 259200
+      TIME//6mt+:
+      - 259200
+      - 518400
+engine:
+  mem_fraction: 0.95
+  patient_chunk_size: 1000
+  extra_kwargs: {}
+prompt_overflow: truncate_left
+save:
+  trajectories: true
+  scores: true
+  patient_index: true
+  config_snapshot: true
