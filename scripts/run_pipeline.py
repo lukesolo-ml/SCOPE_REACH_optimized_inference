@@ -16,9 +16,8 @@ Scoring modes
   - two-pass (default): generate trajectories, then run a separate prefill-only
     forward pass to extract P(target_event) logprobs and compute SCOPE/REACH.
   - inline (score_inline=True): compute SCOPE/REACH during generation via
-    InlineScopeReachProcessor. Requires the time-horizon processor's engine
-    configuration (disable_overlap_schedule=True, enable_custom_logit_processor=True).
-    Per-trajectory estimates are attached directly to GeneratedTrajectory.
+    token_ids_logprob. Per-trajectory estimates are attached directly to
+    GeneratedTrajectory.
 
 Usage:
     python run_pipeline.py --config pipeline_config.yaml
@@ -30,14 +29,64 @@ import asyncio
 import json
 import logging
 import math
+import os
 import pathlib
+import re
 import sys
+import threading
 import time
+import warnings
 from datetime import datetime, timezone
+
+# Python 3.12 resource_tracker race condition — harmless, from SGLang's loky subprocess pool
+warnings.filterwarnings("ignore", message="resource_tracker: process died unexpectedly")
+
+
+def _suppress_resource_tracker_stderr() -> None:
+    """Redirect fd 2 through a filter thread to drop resource_tracker KeyError noise.
+
+    Python 3.12 has a race in the multiprocessing resource_tracker daemon (triggered
+    by loky/SGLang) that prints spurious KeyError tracebacks to stderr. These originate
+    in a forked subprocess so warnings.filterwarnings cannot intercept them — they
+    write directly to fd 2. We replace fd 2 with a pipe and drain it on a daemon
+    thread, blocking any line that matches the known noise pattern.
+    """
+    _NOISE = re.compile(
+        r"resource_tracker\.py|cache\[rtype\]\.remove\(name\)|KeyError: '/loky-"
+    )
+
+    r_fd, w_fd = os.pipe()
+    real_fd = os.dup(2)
+    os.dup2(w_fd, 2)
+    os.close(w_fd)
+
+    real_stderr = os.fdopen(real_fd, "w", buffering=1)
+    sys.stderr = real_stderr
+
+    def _run() -> None:
+        buf: list[str] = []
+        with os.fdopen(r_fd, "r", buffering=1, errors="replace") as pipe:
+            for line in pipe:
+                if line.rstrip() == "Traceback (most recent call last):":
+                    buf = [line]
+                elif buf:
+                    buf.append(line)
+                    if not (line.startswith("  ") or line.startswith("\t")):
+                        if not any(_NOISE.search(l) for l in buf):
+                            real_stderr.writelines(buf)
+                            real_stderr.flush()
+                        buf = []
+                elif not _NOISE.search(line):
+                    real_stderr.write(line)
+                    real_stderr.flush()
+
+    threading.Thread(target=_run, daemon=True, name="stderr-filter").start()
 
 import numpy as np
 import polars as pl
 import yaml
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from quick_sco_re import (
     GenerationConfig,
@@ -46,6 +95,7 @@ from quick_sco_re import (
     create_engine,
     generate_and_score,
     generate_trajectories,
+    generate_m2_from_m1_trajectories,
     score_trajectories,
     aggregate_results,
     save_trajectories,
@@ -58,7 +108,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     force=True,
 )
+logging.getLogger("sglang").setLevel(logging.WARNING)
 logger = logging.getLogger("scope_reach_pipeline")
+_suppress_resource_tracker_stderr()
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +503,8 @@ async def run_pipeline(cfg: dict):
         index_df.write_parquet(output_dir / "patient_index.parquet")
         logger.info(f"Saved patient index ({len(subject_ids)} patients) with outcome flags")
 
-    # Engine configuration. Both time-horizon and inline SCOPE/REACH require
-    # the custom-logit-processor path, which needs disable_overlap_schedule=True.
     use_time = gen_config.max_time is not None and gen_config.trunc_id is not None
-    needs_processor = use_time or score_inline
+    needs_processor = use_time
     mem_frac = cfg.get("engine", {}).get("mem_fraction", 0.85)
 
     logger.info(
@@ -473,7 +523,10 @@ async def run_pipeline(cfg: dict):
         logger.info("Running warmup pass...")
         warmup_tokens = patient_tokens[:min(2, len(patient_tokens))]
         if score_inline:
-            await generate_trajectories(engine, gen_config, warmup_tokens, methods)
+            warmup_m1 = await generate_trajectories(engine, gen_config, warmup_tokens, ["M1"])
+            if "M2" in methods:
+                warmup_m2 = await generate_m2_from_m1_trajectories(engine, gen_config, warmup_m1, warmup_tokens)
+                await score_trajectories(engine, gen_config, warmup_m2, warmup_tokens)
         else:
             await generate_and_score(
                 engine, gen_config, warmup_tokens,
@@ -496,47 +549,53 @@ async def run_pipeline(cfg: dict):
         results = []
         n_patients = len(patient_tokens)
 
-        for chunk_start in range(0, n_patients, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, n_patients)
-            chunk_tokens = patient_tokens[chunk_start:chunk_end]
-            chunk_n_traj = len(chunk_tokens) * gen_config.n_samp * len(methods)
-            logger.info(
-                f"Chunk [{chunk_start}:{chunk_end}] — "
-                f"{len(chunk_tokens)} patients, {chunk_n_traj} trajectories"
-            )
+        with logging_redirect_tqdm():
+            with tqdm(total=n_patients, desc="Generating", unit="pt", dynamic_ncols=True) as pbar:
+                for chunk_start in range(0, n_patients, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, n_patients)
+                    chunk_tokens = patient_tokens[chunk_start:chunk_end]
 
-            if score_inline:
-                chunk_traj = await generate_trajectories(
-                    engine, gen_config, chunk_tokens, methods
-                )
-                # Aggregate with chunk-local patient_idx (matches two-pass path)
-                chunk_results = aggregate_inline_results(
-                    chunk_traj, num_patients=len(chunk_tokens), config=gen_config
-                )
-            else:
-                chunk_traj, chunk_results = await generate_and_score(
-                    engine, gen_config, chunk_tokens,
-                    target_token_id=gen_config.target_event_id,
-                    methods=methods,
-                )
+                    if score_inline:
+                        chunk_m1 = await generate_trajectories(engine, gen_config, chunk_tokens, ["M1"])
+                        scored_m2 = []
+                        if "M2" in methods:
+                            chunk_m2 = await generate_m2_from_m1_trajectories(
+                                engine, gen_config, chunk_m1, chunk_tokens
+                            )
+                            scored_m2 = await score_trajectories(
+                                engine, gen_config, chunk_m2, chunk_tokens
+                            )
+                            chunk_traj = chunk_m1 + list(chunk_m2)
+                        else:
+                            chunk_traj = chunk_m1
+                        chunk_results = aggregate_inline_results(
+                            chunk_m1, num_patients=len(chunk_tokens), config=gen_config
+                        )
+                        for st in scored_m2:
+                            chunk_results[st.trajectory.patient_idx].m2_samples.append(st.score)
+                    else:
+                        chunk_traj, chunk_results = await generate_and_score(
+                            engine, gen_config, chunk_tokens,
+                            target_token_id=gen_config.target_event_id,
+                            methods=methods,
+                        )
 
-            trajectories.extend(chunk_traj)
-            results.extend(chunk_results)
-
-            elapsed_so_far = time.time() - gen_start
-            done = chunk_end
-            rate = done / elapsed_so_far if elapsed_so_far > 0 else 0
-            eta = (n_patients - done) / rate if rate > 0 else float("inf")
-            logger.info(
-                f"  {done}/{n_patients} patients done "
-                f"({elapsed_so_far:.1f}s elapsed, ~{eta:.0f}s remaining)"
-            )
+                    trajectories.extend(chunk_traj)
+                    results.extend(chunk_results)
+                    pbar.update(len(chunk_tokens))
 
         gen_elapsed = time.time() - gen_start
         logger.info(f"Generation + scoring completed in {gen_elapsed:.1f}s")
 
-        total_gen_tokens = sum(len(t.output_ids) for t in trajectories)
-        logger.info(f"Total generated tokens: {total_gen_tokens:,}")
+        m1_tokens = sum(len(t.output_ids) for t in trajectories if t.traj_type == TrajectoryType.M1)
+        m2_tokens = sum(t.n_new_tokens for t in trajectories if t.traj_type == TrajectoryType.M2 and t.n_new_tokens is not None)
+        total_gen_tokens = m1_tokens + m2_tokens
+        logger.info(f"Generated tokens — M1: {m1_tokens:,}  M2 (new only): {m2_tokens:,}  total: {total_gen_tokens:,}")
+
+        m1_trajs = [t for t in trajectories if t.traj_type == TrajectoryType.M1]
+        m1_with_event = sum(1 for t in m1_trajs if t.timeline_terminating_id == gen_config.target_event_id)
+        m1_total = len(m1_trajs)
+        logger.info(f"M1 trajectories with target event: {m1_with_event:,} / {m1_total:,} ({m1_with_event / m1_total:.1%})")
         if gen_elapsed > 0:
             logger.info(f"Throughput: {total_gen_tokens / gen_elapsed:,.0f} tok/s")
 
@@ -560,8 +619,13 @@ async def run_pipeline(cfg: dict):
         # Compute AUCs against winnower outcome flags
         target_event_name = cfg["generation"]["target_event"]
         future_col = f"{target_event_name}_future"
+        true_n_events = None
+        true_prevalence = None
         if future_col in metadata_df.columns:
             outcome = metadata_df[future_col].to_numpy().astype(float)
+            true_n_events = int(outcome.sum())
+            true_prevalence = float(true_n_events / len(outcome)) if len(outcome) > 0 else 0.0
+            logger.info(f"True prevalence ({future_col}): {true_n_events} / {len(outcome)} ({true_prevalence:.1%})")
             try:
                 from sklearn.metrics import roc_auc_score
                 for est_name, est_arr in [("M0", M0), ("M1", M1), ("M2", M2)]:
@@ -599,7 +663,14 @@ async def run_pipeline(cfg: dict):
             "tracked_name": gen_config.tracked_name,
             "tracked_ids_len": len(gen_config.tracked_ids) if gen_config.tracked_ids else 0,
             "wall_time_seconds": gen_elapsed,
+            "m1_generated_tokens": m1_tokens,
+            "m2_generated_tokens": m2_tokens,
             "total_generated_tokens": total_gen_tokens,
+            "m1_with_target_event": m1_with_event,
+            "m1_total_trajectories": m1_total,
+            "m1_event_rate": m1_with_event / m1_total if m1_total > 0 else 0.0,
+            "true_n_events": true_n_events,
+            "true_prevalence": true_prevalence,
             "mean_M0": float(np.nanmean(M0)),
             "mean_M1": float(np.nanmean(M1)),
             "mean_M2": float(np.nanmean(M2)),

@@ -1,0 +1,92 @@
+# ============================================================================
+# SCOPE/REACH Inference Pipeline Configuration
+# ============================================================================
+# Consumes the winnowed held-out data produced by cocoa's Winnower.
+# Run `cocoa winnow` first to generate held_out_for_inference.parquet.
+
+# --- Paths ---
+cocoa_outputs:
+  # The winnower output — contains tokens_past (prompts), outcome flags, etc.
+  held_out_for_inference: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed2/held_out_for_inference.parquet
+  # The tokenizer artifact — used to resolve token names to IDs.
+  tokenizer_yaml: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
+
+# Model
+model_path: /mnt/bbj-lab/users/lsolo/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
+
+# Output directory (trajectories, scores, metadata saved here)
+output_dir: ./scope_reach_output
+
+# --- Cohort Selection ---
+cohort:
+  max_patients: 100          # null = use all; integer to subsample
+  shuffle_seed: 39            # seed for subsampling if max_patients is set
+  # Optional outcome-based filters (applied to the winnower's boolean flags).
+  # These reference the columns produced by the winnower, e.g.:
+  #   "DSCG//expired_past", "DSCG//expired_future", "XFR-IN//icu_future"
+  # Set to null to skip.
+  require_flag: null           # e.g. "XFR-IN//icu_future" — keep only where True
+  exclude_flag: "DSCG//expired_past"           # e.g. "DSCG//expired_past" — drop where True
+
+# --- Generation Config ---
+generation:
+  max_len: 10000              # max total sequence length (prompt + generation)
+  n_samp: 10                   # MC samples per patient per trajectory type
+  temperature: 1.0             # sampling temperature (1.0 for proper MC)
+  score_inline: true
+  methods:                     # which trajectory types to run
+    - M1
+    - M2
+
+  # Target event: the token whose probability you want to estimate.
+  # Specify by name (resolved via cocoa tokenizer vocabulary).
+  target_event: DSCG//expired
+
+  # End tokens: tokens that naturally terminate a sequence.
+  end_tokens:
+    prefixes:
+      - DSCG                   # all discharge tokens end a sequence
+    names: []                  # additional specific token names
+
+  # Suppressed tokens: tokens to suppress via logit bias during generation.
+  suppressed_tokens:
+    - BOS
+
+  # --- Time-Based Stopping (optional) ---
+  time_stopping:
+    enabled: false
+    trunc_token: UNK         # token forced when time horizon is exceeded
+    max_time_minutes: 14400000000000000.0  # simulated time limit (e.g. 1440 = 24 hours)
+    time_check_interval: 100   # tokens between time-horizon checks
+    time_token_bounds:
+      "TIME//5m-15m": [5, 15]
+      "TIME//15m-1h": [15, 60]
+      "TIME//1h-2h": [60, 120]
+      "TIME//2h-6h": [120, 360]
+      "TIME//6h-12h": [360, 720]
+      "TIME//12h-1d": [720, 1440]
+      "TIME//1d-3d": [1440, 4320]
+      "TIME//3d-1w": [4320, 10080]
+      "TIME//1w-2w": [10080, 20160]
+      "TIME//2w-1mt": [20160, 43200]
+      "TIME//1mt-3mt": [43200, 129600]
+      "TIME//3mt-6mt": [129600, 259200]
+      "TIME//6mt+": [259200, 518400]
+
+# --- Engine ---
+engine:
+  mem_fraction: 0.95
+  patient_chunk_size: 1000
+  extra_kwargs: {}
+
+# --- Prompt Handling ---
+# How to handle prompts (tokens_past) that exceed max_len.
+# "drop" = skip the patient; "truncate_left" = keep the last max_len tokens.
+prompt_overflow: truncate_left
+
+# --- Saving ---
+save:
+  trajectories: true           # save raw trajectories (allows re-scoring later)
+  scores: true                 # save per-patient M0/M1/M2 scores
+  patient_index: true          # save subject_id ↔ patient_idx mapping with outcome flags
+  config_snapshot: true        # save a copy of this config in the output dir

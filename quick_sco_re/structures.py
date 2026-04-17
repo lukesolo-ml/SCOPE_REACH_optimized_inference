@@ -113,6 +113,7 @@ class GeneratedTrajectory:
     occurred_index: np.ndarray | None = None
     inline_tracked_ids: list[int] | None = None
     inline_tracked_name: str | None = None
+    n_new_tokens: int | None = None
 
 
 @dataclass

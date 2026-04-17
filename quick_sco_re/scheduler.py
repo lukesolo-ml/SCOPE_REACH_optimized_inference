@@ -19,7 +19,7 @@ from typing import Sequence
 
 import sglang as sgl
 
-from .generation import generate_trajectory
+from .generation import generate_trajectory, generate_m2_from_m1_trajectory
 from .scoring import score_trajectory
 from .structures import (
     GeneratedTrajectory,
@@ -42,7 +42,7 @@ def create_engine(model_path, max_len, use_time_horizon = False, mem_fraction = 
         disable_cuda_graph=True,
         sampling_backend="pytorch",
         mem_fraction_static=mem_fraction,
-        log_level='info',
+        log_level='warning',
     )
 
 async def generate_trajectories(
@@ -88,6 +88,41 @@ async def generate_trajectories(
     logger.info(f"Generation completed in {elapsed:.2f}s")
 
     return list(trajectories)
+
+async def generate_m2_from_m1_trajectories(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    m1_trajectories: Sequence[GeneratedTrajectory],
+    patient_tokens: Sequence[list[int]],
+) -> list[GeneratedTrajectory]:
+    """Derive M2 trajectories from completed M1 trajectories.
+
+    For each M1 trajectory: if the target event was not generated, wraps the
+    output as M2. If the target event was generated, truncates before it and
+    regenerates the continuation with the event suppressed.
+
+    Args:
+        engine: SGLang inference engine.
+        config: Generation configuration.
+        m1_trajectories: Completed M1 trajectories.
+        patient_tokens: Original patient prompts indexed by patient_idx.
+
+    Returns:
+        List of M2 trajectories, one per input M1 trajectory.
+    """
+    tasks = [
+        generate_m2_from_m1_trajectory(
+            engine, config, traj, patient_tokens[traj.patient_idx]
+        )
+        for traj in m1_trajectories
+    ]
+    logger.info(f"Deriving {len(tasks)} M2 trajectories from M1...")
+    start = time.time()
+    m2_trajectories = await asyncio.gather(*tasks)
+    elapsed = time.time() - start
+    logger.info(f"M2 derivation completed in {elapsed:.2f}s")
+    return list(m2_trajectories)
+
 
 async def score_trajectories(
     engine: sgl.Engine,
@@ -172,7 +207,16 @@ async def generate_and_score(
     """
     total_start = time.time()
 
-    trajectories = await generate_trajectories(engine, config, patient_tokens, methods)
+    m1_trajectories = await generate_trajectories(engine, config, patient_tokens, ["M1"])
+
+    if "M2" in methods:
+        m2_trajectories = await generate_m2_from_m1_trajectories(
+            engine, config, m1_trajectories, patient_tokens
+        )
+        trajectories = m1_trajectories + list(m2_trajectories)
+    else:
+        trajectories = m1_trajectories
+
     scored = await score_trajectories(engine, config, trajectories, patient_tokens)
     results = aggregate_results(scored, num_patients=len(patient_tokens), target_event_id=target_token_id)
 
