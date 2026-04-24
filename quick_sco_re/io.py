@@ -110,7 +110,13 @@ def save_trajectories(
             tracked_ids_flat.extend(traj.inline_tracked_ids)
         tracked_ids_offsets.append(len(tracked_ids_flat))
 
-        tracked_names.append(traj.inline_tracked_name if traj.inline_tracked_name is not None else "")
+        name = traj.inline_tracked_name
+        if name is None:
+            tracked_names.append("")
+        elif isinstance(name, list):
+            tracked_names.append("|".join(name))
+        else:
+            tracked_names.append(str(name))
 
     save_dict = dict(
         schema_version=np.array([SCHEMA_VERSION], dtype=np.int32),
@@ -157,7 +163,7 @@ def save_trajectories(
             "max_time": config.max_time,
             "time_check_interval": config.time_check_interval,
             "tracked_ids": config.tracked_ids,
-            "tracked_name": config.tracked_name,
+            "tracked_names": config.tracked_names,
         }
         with open(output_dir / "config.json", "w") as f:
             json.dump(config_dict, f, indent=2)
@@ -251,7 +257,7 @@ def load_trajectories(
 
             name_val = str(data["tracked_name"][i])
             if name_val:
-                inline_tracked_name = name_val
+                inline_tracked_name = name_val.split("|")
 
         trajectories.append(
             GeneratedTrajectory(
@@ -288,18 +294,39 @@ def load_trajectories(
     return trajectories, config
 
 
+def _pad_to_2d(sample_lists: list[list[float]]) -> np.ndarray:
+    """Pad a list of variable-length sample lists into a 2D float32 array, NaN-filled."""
+    if not sample_lists:
+        return np.empty((0, 0), dtype=np.float32)
+    max_len = max(len(s) for s in sample_lists)
+    if max_len == 0:
+        return np.full((len(sample_lists), 0), np.nan, dtype=np.float32)
+    out = np.full((len(sample_lists), max_len), np.nan, dtype=np.float32)
+    for i, s in enumerate(sample_lists):
+        if s:
+            out[i, : len(s)] = s
+    return out
+
+
 def save_scores(
     results: Sequence[PatientResults],
     output_path: pathlib.Path | str,
+    *,
+    avg_m1_tokens: float | None = None,
+    avg_m2_tokens: float | None = None,
 ) -> pathlib.Path:
-    """Save aggregated patient scores to disk.
+    """Save patient scores to disk.
 
-    Saves three arrays (M0, M1, M2) where each element is the mean
-    estimator value for a patient.
+    Saves per-patient mean scores (M0, M1, M2) and full per-timeline raw
+    samples (M0_raw, M1_raw, M2_raw) as NaN-padded 2D arrays for downstream
+    analysis (e.g. subsampling bootstraps). Optionally saves average token
+    costs per M1/M2 trajectory for token-efficiency comparisons.
 
     Args:
         results: Per-patient results from the scheduler.
         output_path: Path for the output .npz file.
+        avg_m1_tokens: Average tokens generated per M1 trajectory.
+        avg_m2_tokens: Average tokens generated per M2 trajectory.
 
     Returns:
         Path to the saved file.
@@ -311,7 +338,17 @@ def save_scores(
     M1 = np.array([np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results])
     M2 = np.array([np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results])
 
-    np.savez_compressed(output_path, M0=M0, M1=M1, M2=M2)
+    M0_raw = _pad_to_2d([list(map(float, r.m0_samples)) for r in results])
+    M1_raw = _pad_to_2d([list(map(float, r.m1_samples)) for r in results])
+    M2_raw = _pad_to_2d([list(map(float, r.m2_samples)) for r in results])
+
+    save_kwargs: dict = dict(M0=M0, M1=M1, M2=M2, M0_raw=M0_raw, M1_raw=M1_raw, M2_raw=M2_raw)
+    if avg_m1_tokens is not None:
+        save_kwargs["avg_m1_tokens"] = np.array([avg_m1_tokens], dtype=np.float64)
+    if avg_m2_tokens is not None:
+        save_kwargs["avg_m2_tokens"] = np.array([avg_m2_tokens], dtype=np.float64)
+
+    np.savez_compressed(output_path, **save_kwargs)
     return output_path
 
 
@@ -320,11 +357,14 @@ def load_scores(
 ) -> dict[str, np.ndarray]:
     """Load saved scores.
 
-    Args:
-        input_path: Path to the .npz scores file.
-
-    Returns:
-        Dict with keys "M0", "M1", "M2" mapping to numpy arrays.
+    Returns a dict with keys:
+        M0, M1, M2       — per-patient mean scores (always present)
+        M0_raw, M1_raw, M2_raw  — NaN-padded (n_patients × max_samples) arrays
+        avg_m1_tokens, avg_m2_tokens  — shape-(1,) float64 arrays (if saved)
     """
     data = np.load(input_path)
-    return {"M0": data["M0"], "M1": data["M1"], "M2": data["M2"]}
+    result: dict = {"M0": data["M0"], "M1": data["M1"], "M2": data["M2"]}
+    for key in ("M0_raw", "M1_raw", "M2_raw", "avg_m1_tokens", "avg_m2_tokens"):
+        if key in data.files:
+            result[key] = data[key]
+    return result

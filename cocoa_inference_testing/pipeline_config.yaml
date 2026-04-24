@@ -7,20 +7,20 @@
 # --- Paths ---
 cocoa_outputs:
   # The winnower output — contains tokens_past (prompts), outcome flags, etc.
-  held_out_for_inference: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed2/held_out_for_inference.parquet
+  held_out_for_inference: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/held_out_for_inference.parquet
   # The tokenizer artifact — used to resolve token names to IDs.
   tokenizer_yaml: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
 
 # Model
-model_path: /mnt/bbj-lab/users/lsolo/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
+model_path: /home/lsolo/paper_fast/new/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
 
 # Output directory (trajectories, scores, metadata saved here)
 output_dir: ./scope_reach_output
 
 # --- Cohort Selection ---
 cohort:
-  max_patients: 100          # null = use all; integer to subsample
-  shuffle_seed: 39            # seed for subsampling if max_patients is set
+  max_patients: null          # null = use all; integer to subsample
+  shuffle_seed: 42            # seed for subsampling if max_patients is set
   # Optional outcome-based filters (applied to the winnower's boolean flags).
   # These reference the columns produced by the winnower, e.g.:
   #   "DSCG//expired_past", "DSCG//expired_future", "XFR-IN//icu_future"
@@ -31,16 +31,32 @@ cohort:
 # --- Generation Config ---
 generation:
   max_len: 10000              # max total sequence length (prompt + generation)
-  n_samp: 10                   # MC samples per patient per trajectory type
+  n_samp: 100                   # MC samples per patient per trajectory type
   temperature: 1.0             # sampling temperature (1.0 for proper MC)
   score_inline: true
   methods:                     # which trajectory types to run
     - M1
     - M2
 
-  # Target event: the token whose probability you want to estimate.
+  # Tracked events: tokens whose probability you want to estimate.
   # Specify by name (resolved via cocoa tokenizer vocabulary).
-  target_event: DSCG//expired
+  # Use 'tracked_events' (list) for multi-outcome; legacy 'target_event' (single) also accepted.
+  tracked_events:
+    - XFR-IN//icu #ICU admission
+    - RESP//imv #IMV
+    - DSCG//expired #Mortality
+    - LAB-RES//sodium_Q0 # Prof HypoNa
+    - LAB-RES//sodium_Q9 # Sev HyperNa
+    - LAB-RES//potassium_Q0 # Prof hypoK
+    - LAB-RES//potassium_Q9 # HyperK
+    - LAB-RES//hemoglobin_Q0 #anemia
+    - LAB-RES//glucose_serum_Q0 #Hypoglycemia
+    - VTL//heart_rate_Q9 #Tachycardia
+    - SOFA//resp-4 #Sofa resp 4
+    - SOFA//renal-4 #Sofa renal 4
+    - SOFA//liver-4 #Sofa liver 4
+    - SOFA//cv-4 #Sofa cardiovascular 4
+    - ASMT//cam_total_positive # Positive confusion score
 
   # End tokens: tokens that naturally terminate a sequence.
   end_tokens:
@@ -76,7 +92,7 @@ generation:
 # --- Engine ---
 engine:
   mem_fraction: 0.95
-  patient_chunk_size: 1000
+  patient_chunk_size: 10
   extra_kwargs: {}
 
 # --- Prompt Handling ---

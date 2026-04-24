@@ -26,6 +26,7 @@ Usage:
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -132,9 +133,11 @@ def load_config(path: str | pathlib.Path) -> dict:
         if k not in cfg["cocoa_outputs"]:
             raise ValueError(f"cocoa_outputs missing required key: '{k}'")
 
-    for k in ["max_len", "n_samp", "target_event"]:
+    for k in ["max_len", "n_samp"]:
         if k not in cfg["generation"]:
             raise ValueError(f"generation missing required key: '{k}'")
+    if "tracked_events" not in cfg["generation"] and "target_event" not in cfg["generation"]:
+        raise ValueError("generation config must specify 'tracked_events' (list) or 'target_event' (single)")
 
     return cfg
 
@@ -229,6 +232,21 @@ def load_winnowed_data(cfg: dict, vocab: CocoaVocab) -> tuple[list[list[int]], l
             df = df.filter(~pl.col(exclude_flag))
             logger.info(f"After exclude_flag '{exclude_flag}': {df.height} patients")
 
+    # Drop discharged patients: any DSCG// prefix token in tokens_past
+    dscg_ids = list(vocab.ids_with_prefix("DSCG"))
+    if dscg_ids:
+        before = df.height
+        df = df.filter(
+            ~pl.col("tokens_past").list.eval(pl.element().is_in(dscg_ids)).list.any()
+        )
+        n_discharged = before - df.height
+        logger.info(
+            f"Dropped {n_discharged} discharged patients (DSCG token in timeline); "
+            f"{df.height} remaining"
+        )
+    else:
+        logger.warning("No DSCG tokens found in vocabulary — discharge filter skipped")
+
     # Optional subsample
     max_patients = cohort.get("max_patients")
     if max_patients is not None and df.height > max_patients:
@@ -303,12 +321,23 @@ def build_generation_config(cfg: dict, vocab: CocoaVocab) -> tuple[GenerationCon
     """
     gen = cfg["generation"]
 
-    # Target event
-    target_name = gen["target_event"]
-    target_id = vocab(target_name)
-    if target_id == 0 and target_name != "UNK":
-        raise ValueError(f"target_event '{target_name}' not found in vocabulary")
-    logger.info(f"Target event: '{target_name}' → token ID {target_id}")
+    # Tracked events — support both new 'tracked_events' list and legacy 'target_event'
+    if "tracked_events" in gen:
+        event_names = list(gen["tracked_events"])
+        if not event_names:
+            raise ValueError("tracked_events cannot be empty")
+    else:
+        event_names = [gen["target_event"]]
+
+    tracked_event_ids = []
+    for name in event_names:
+        tid = vocab(name)
+        if tid == 0 and name != "UNK":
+            raise ValueError(f"tracked_event '{name}' not found in vocabulary")
+        tracked_event_ids.append(tid)
+        logger.info(f"Tracked event: '{name}' → token ID {tid}")
+
+    primary_id = tracked_event_ids[0]
 
     # End tokens
     end_ids: set[int] = set()
@@ -368,44 +397,28 @@ def build_generation_config(cfg: dict, vocab: CocoaVocab) -> tuple[GenerationCon
     else:
         logger.info("Time-based stopping: DISABLED")
 
-    # Scoring mode
     score_inline = gen.get("score_inline", False)
 
-    # Inline tracked tokens. When score_inline is set, default to tracking just
-    # the target event. Users can override via generation.tracked_tokens (list
-    # of vocab names).
-    tracked_ids: list[int] | None = None
-    tracked_name: str | None = None
-    if score_inline:
-        tracked_token_names = gen.get("tracked_tokens")
-        if tracked_token_names:
-            tracked_ids = []
-            for name in tracked_token_names:
-                tid = vocab(name)
-                if tid != 0 or name == "UNK":
-                    tracked_ids.append(tid)
-                else:
-                    logger.warning(f"Tracked token '{name}' not in vocab — skipping")
-            tracked_name = gen.get("tracked_name", "custom")
-        else:
-            tracked_ids = [target_id]
-            tracked_name = target_name
+    # tracked_ids only set for inline scoring (controls inline logprob requests in generation)
+    inline_tracked_ids = tracked_event_ids if score_inline else None
 
+    if score_inline:
         logger.info(
-            f"Scoring mode: INLINE — tracking {len(tracked_ids)} token(s) "
-            f"(name='{tracked_name}', ids={tracked_ids[:10]}{'...' if len(tracked_ids) > 10 else ''})"
-        )
-        logger.info(
-            "Inline scoring requires engine with disable_overlap_schedule=True "
-            "and enable_custom_logit_processor=True."
+            f"Scoring mode: INLINE — tracking {len(tracked_event_ids)} event(s): "
+            f"{event_names}"
         )
     else:
+        if len(event_names) > 1:
+            logger.warning(
+                "Two-pass scoring mode does not support multiple tracked events. "
+                "Only the first event will be scored."
+            )
         logger.info("Scoring mode: TWO-PASS (separate prefill scoring pass)")
 
     config = GenerationConfig(
         max_len=gen["max_len"],
         n_samp=gen["n_samp"],
-        target_event_id=target_id,
+        target_event_id=primary_id,
         end_token_ids=end_ids,
         suppressed_ids=suppressed_ids,
         temperature=gen.get("temperature", 1.0),
@@ -413,8 +426,8 @@ def build_generation_config(cfg: dict, vocab: CocoaVocab) -> tuple[GenerationCon
         token_id_to_minutes=token_id_to_minutes,
         max_time=max_time,
         time_check_interval=time_check_interval,
-        tracked_ids=tracked_ids,
-        tracked_name=tracked_name,
+        tracked_ids=inline_tracked_ids,
+        tracked_names=event_names,
     )
     return config, score_inline
 
@@ -524,9 +537,10 @@ async def run_pipeline(cfg: dict):
         warmup_tokens = patient_tokens[:min(2, len(patient_tokens))]
         if score_inline:
             warmup_m1 = await generate_trajectories(engine, gen_config, warmup_tokens, ["M1"])
-            if "M2" in methods:
-                warmup_m2 = await generate_m2_from_m1_trajectories(engine, gen_config, warmup_m1, warmup_tokens)
-                await score_trajectories(engine, gen_config, warmup_m2, warmup_tokens)
+            if "M2" in methods and gen_config.tracked_ids:
+                first_outcome_config = dataclasses.replace(gen_config, target_event_id=gen_config.tracked_ids[0])
+                warmup_m2 = await generate_m2_from_m1_trajectories(engine, first_outcome_config, warmup_m1, warmup_tokens)
+                await score_trajectories(engine, first_outcome_config, warmup_m2, warmup_tokens)
         else:
             await generate_and_score(
                 engine, gen_config, warmup_tokens,
@@ -537,17 +551,39 @@ async def run_pipeline(cfg: dict):
 
         # Main generation + scoring (chunked by patient)
         chunk_size = cfg.get("engine", {}).get("patient_chunk_size", 64)
-        n_traj = len(patient_tokens) * gen_config.n_samp * len(methods)
+        tracked_names = gen_config.tracked_names or []
+        tracked_ids_list = gen_config.tracked_ids or []
+        n_outcomes = len(tracked_names)
+
         logger.info(
             f"Starting generation: {len(patient_tokens)} patients × "
-            f"{gen_config.n_samp} samples × {len(methods)} methods = "
-            f"{n_traj} trajectories (chunk_size={chunk_size})"
+            f"{gen_config.n_samp} samples × {n_outcomes} outcome(s)"
         )
 
-        gen_start = time.time()
-        trajectories = []
-        results = []
         n_patients = len(patient_tokens)
+
+        # Per-outcome boolean mask: True means patient already had the event in the past
+        # and should be excluded from that outcome's evaluation and M2 generation.
+        outcome_past_masks: list[np.ndarray] = []
+        for evt_name in tracked_names:
+            past_col = f"{evt_name}_past"
+            if past_col in metadata_df.columns:
+                mask = metadata_df[past_col].to_numpy().astype(bool)
+            else:
+                mask = np.zeros(n_patients, dtype=bool)
+            outcome_past_masks.append(mask)
+            n_excl = int(mask.sum())
+            if n_excl:
+                logger.info(
+                    f"  Outcome '{evt_name}': excluding {n_excl} / {n_patients} patients "
+                    f"with past flag '{past_col}'"
+                )
+
+        gen_start = time.time()
+        m1_trajectories: list = []
+        all_results: list[list[PatientResults]] = [[] for _ in range(n_outcomes)]
+        per_outcome_m2_tokens: list[int] = [0] * n_outcomes
+        per_outcome_m2_count: list[int] = [0] * n_outcomes
 
         with logging_redirect_tqdm():
             with tqdm(total=n_patients, desc="Generating", unit="pt", dynamic_ncols=True) as pbar:
@@ -557,99 +593,190 @@ async def run_pipeline(cfg: dict):
 
                     if score_inline:
                         chunk_m1 = await generate_trajectories(engine, gen_config, chunk_tokens, ["M1"])
-                        scored_m2 = []
+                        m1_trajectories.extend(chunk_m1)
+
+                        outcome_configs = [
+                            dataclasses.replace(gen_config, target_event_id=evt_id)
+                            for evt_id in tracked_ids_list
+                        ]
+                        outcome_m1_results_list = [
+                            aggregate_inline_results(chunk_m1, len(chunk_tokens), oc)
+                            for oc in outcome_configs
+                        ]
+
                         if "M2" in methods:
-                            chunk_m2 = await generate_m2_from_m1_trajectories(
-                                engine, gen_config, chunk_m1, chunk_tokens
-                            )
-                            scored_m2 = await score_trajectories(
-                                engine, gen_config, chunk_m2, chunk_tokens
-                            )
-                            chunk_traj = chunk_m1 + list(chunk_m2)
-                        else:
-                            chunk_traj = chunk_m1
-                        chunk_results = aggregate_inline_results(
-                            chunk_m1, num_patients=len(chunk_tokens), config=gen_config
-                        )
-                        for st in scored_m2:
-                            chunk_results[st.trajectory.patient_idx].m2_samples.append(st.score)
+                            # For non-event M1 trajectories: inline REACH is already available —
+                            # no scoring pass needed. Only regenerate where the event occurred.
+                            regen_per_outcome: list[list] = [[] for _ in tracked_ids_list]
+                            for k, (evt_id, om1r) in enumerate(
+                                zip(tracked_ids_list, outcome_m1_results_list)
+                            ):
+                                past_mask_k = outcome_past_masks[k]
+                                for traj in chunk_m1:
+                                    if past_mask_k[chunk_start + traj.patient_idx]:
+                                        continue
+                                    if traj.timeline_terminating_id == evt_id:
+                                        regen_per_outcome[k].append(traj)
+                                    elif (
+                                        traj.inline_tracked_ids is not None
+                                        and traj.reach_estimates is not None
+                                    ):
+                                        try:
+                                            ki = traj.inline_tracked_ids.index(evt_id)
+                                            om1r[traj.patient_idx].m2_samples.append(
+                                                float(traj.reach_estimates[ki])
+                                            )
+                                        except (ValueError, IndexError):
+                                            pass
+
+                            # Regenerate M2 for all outcomes in parallel
+                            regen_m2_lists = await asyncio.gather(*[
+                                generate_m2_from_m1_trajectories(engine, oc, regen, chunk_tokens)
+                                for oc, regen in zip(outcome_configs, regen_per_outcome)
+                            ])
+
+                            # Score all regenerated M2s in parallel across outcomes
+                            scored_regen_lists = await asyncio.gather(*[
+                                score_trajectories(engine, oc, regen_m2, chunk_tokens)
+                                for oc, regen_m2 in zip(outcome_configs, regen_m2_lists)
+                            ])
+
+                            for k, (regen_m2, scored_regen) in enumerate(
+                                zip(regen_m2_lists, scored_regen_lists)
+                            ):
+                                per_outcome_m2_tokens[k] += sum(
+                                    t.n_new_tokens or 0 for t in regen_m2
+                                )
+                                per_outcome_m2_count[k] += len(regen_m2)
+                                om1r = outcome_m1_results_list[k]
+                                for st in scored_regen:
+                                    om1r[st.trajectory.patient_idx].m2_samples.append(st.score)
+
+                        for k, om1r in enumerate(outcome_m1_results_list):
+                            all_results[k].extend(om1r)
+
                     else:
                         chunk_traj, chunk_results = await generate_and_score(
                             engine, gen_config, chunk_tokens,
                             target_token_id=gen_config.target_event_id,
                             methods=methods,
                         )
+                        chunk_m2 = [t for t in chunk_traj if t.traj_type == TrajectoryType.M2]
+                        m1_trajectories.extend(t for t in chunk_traj if t.traj_type == TrajectoryType.M1)
+                        per_outcome_m2_tokens[0] += sum(len(t.output_ids) for t in chunk_m2)
+                        per_outcome_m2_count[0] += len(chunk_m2)
+                        all_results[0].extend(chunk_results)
 
-                    trajectories.extend(chunk_traj)
-                    results.extend(chunk_results)
                     pbar.update(len(chunk_tokens))
 
         gen_elapsed = time.time() - gen_start
         logger.info(f"Generation + scoring completed in {gen_elapsed:.1f}s")
 
-        m1_tokens = sum(len(t.output_ids) for t in trajectories if t.traj_type == TrajectoryType.M1)
-        m2_tokens = sum(t.n_new_tokens for t in trajectories if t.traj_type == TrajectoryType.M2 and t.n_new_tokens is not None)
-        total_gen_tokens = m1_tokens + m2_tokens
-        logger.info(f"Generated tokens — M1: {m1_tokens:,}  M2 (new only): {m2_tokens:,}  total: {total_gen_tokens:,}")
+        # Zero out results for past-flagged patients so they produce NaN scores
+        # and are excluded from AUC/Brier computation for that outcome.
+        for k in range(n_outcomes):
+            for i, is_past in enumerate(outcome_past_masks[k]):
+                if is_past:
+                    all_results[k][i] = PatientResults()
 
-        m1_trajs = [t for t in trajectories if t.traj_type == TrajectoryType.M1]
-        m1_with_event = sum(1 for t in m1_trajs if t.timeline_terminating_id == gen_config.target_event_id)
-        m1_total = len(m1_trajs)
-        logger.info(f"M1 trajectories with target event: {m1_with_event:,} / {m1_total:,} ({m1_with_event / m1_total:.1%})")
+        m1_tokens = sum(len(t.output_ids) for t in m1_trajectories)
+        avg_m1_tokens = m1_tokens / len(m1_trajectories) if m1_trajectories else 0.0
+        total_m2_tokens = sum(per_outcome_m2_tokens)
+        total_gen_tokens = m1_tokens + total_m2_tokens
+        logger.info(f"Generated tokens — M1: {m1_tokens:,}  M2 total: {total_m2_tokens:,}  overall: {total_gen_tokens:,}")
         if gen_elapsed > 0:
             logger.info(f"Throughput: {total_gen_tokens / gen_elapsed:,.0f} tok/s")
 
-        log_trajectory_diagnostics(trajectories, gen_config, "main", logger)
+        log_trajectory_diagnostics(m1_trajectories, gen_config, "main", logger)
 
-        # Summary statistics
-        M0 = np.array([np.mean(r.m0_samples) if r.m0_samples else np.nan for r in results])
-        M1 = np.array([np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results])
-        M2 = np.array([np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results])
+        # Per-outcome statistics and AUC
+        outcomes_summary: dict = {}
+        try:
+            from sklearn.metrics import roc_auc_score
+            _has_sklearn = True
+        except ImportError:
+            _has_sklearn = False
+            logger.info("sklearn not available — skipping AUC computation")
 
-        for name, arr in [("M0 (MC)", M0), ("M1 (SCOPE)", M1), ("M2 (REACH)", M2)]:
-            valid = arr[~np.isnan(arr)]
-            if len(valid) > 0:
-                logger.info(
-                    f"{name}: mean={np.nanmean(arr):.4f}, "
-                    f"std={np.nanstd(arr):.4f}, "
-                    f"median={np.nanmedian(arr):.4f}, "
-                    f"[{np.nanmin(arr):.4f}, {np.nanmax(arr):.4f}]"
+        for k, evt_name in enumerate(tracked_names):
+            evt_id = tracked_ids_list[k] if tracked_ids_list else gen_config.target_event_id
+            results_k = all_results[k]
+
+            M0_k = np.array([np.mean(r.m0_samples) if r.m0_samples else np.nan for r in results_k])
+            M1_k = np.array([np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results_k])
+            M2_k = np.array([np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results_k])
+
+            m1_with_event = sum(1 for t in m1_trajectories if t.timeline_terminating_id == evt_id)
+            m1_total = len(m1_trajectories)
+
+            logger.info(f"=== Outcome: {evt_name} ===")
+            logger.info(f"  M1 event rate: {m1_with_event:,} / {m1_total:,} ({m1_with_event / m1_total:.1%})")
+            for est_name, arr in [("M0", M0_k), ("M1 SCOPE", M1_k), ("M2 REACH", M2_k)]:
+                if not np.all(np.isnan(arr)):
+                    logger.info(
+                        f"  {est_name}: mean={np.nanmean(arr):.4f}  "
+                        f"std={np.nanstd(arr):.4f}  median={np.nanmedian(arr):.4f}"
+                    )
+
+            future_col = f"{evt_name}_future"
+            true_n_events = None
+            true_prevalence = None
+            auc_M0 = auc_M1 = auc_M2 = None
+            if future_col in metadata_df.columns:
+                outcome_arr = metadata_df[future_col].to_numpy().astype(float)
+                eval_mask = ~outcome_past_masks[k]
+                eval_outcome_arr = outcome_arr[eval_mask]
+                true_n_events = int(eval_outcome_arr.sum())
+                true_prevalence = float(true_n_events / len(eval_outcome_arr)) if len(eval_outcome_arr) > 0 else 0.0
+                logger.info(f"  True prevalence: {true_n_events} / {len(outcome_arr)} ({true_prevalence:.1%})")
+                if _has_sklearn:
+                    _aucs: dict = {}
+                    for est_name, est_arr in [("M0", M0_k), ("M1", M1_k), ("M2", M2_k)]:
+                        valid_mask = ~np.isnan(est_arr)
+                        if valid_mask.sum() > 0 and len(np.unique(outcome_arr[valid_mask])) > 1:
+                            _aucs[est_name] = float(roc_auc_score(outcome_arr[valid_mask], est_arr[valid_mask]))
+                            logger.info(f"  AUC {est_name}: {_aucs[est_name]:.4f}")
+                        else:
+                            logger.info(f"  AUC {est_name}: N/A (single class)")
+                    auc_M0 = _aucs.get("M0")
+                    auc_M1 = _aucs.get("M1")
+                    auc_M2 = _aucs.get("M2")
+            else:
+                logger.info(f"  No '{future_col}' column found — skipping AUC")
+
+            outcomes_summary[evt_name] = {
+                "event_id": evt_id,
+                "m1_event_rate": m1_with_event / m1_total if m1_total > 0 else 0.0,
+                "m2_generated_tokens": per_outcome_m2_tokens[k],
+                "true_n_events": true_n_events,
+                "true_prevalence": true_prevalence,
+                "mean_M0": float(np.nanmean(M0_k)),
+                "mean_M1": float(np.nanmean(M1_k)),
+                "mean_M2": float(np.nanmean(M2_k)),
+                "auc_M0": auc_M0,
+                "auc_M1": auc_M1,
+                "auc_M2": auc_M2,
+            }
+
+            if save_cfg.get("scores", True):
+                safe_name = evt_name.replace("/", "_").replace(" ", "_")
+                scores_path = output_dir / f"scores_{safe_name}.npz"
+                avg_m2_toks = (
+                    per_outcome_m2_tokens[k] / per_outcome_m2_count[k]
+                    if per_outcome_m2_count[k] > 0 else 0.0
                 )
+                save_scores(
+                    results_k, scores_path,
+                    avg_m1_tokens=avg_m1_tokens,
+                    avg_m2_tokens=avg_m2_toks,
+                )
+                logger.info(f"  Saved scores → {scores_path.name}")
 
-        # Compute AUCs against winnower outcome flags
-        target_event_name = cfg["generation"]["target_event"]
-        future_col = f"{target_event_name}_future"
-        true_n_events = None
-        true_prevalence = None
-        if future_col in metadata_df.columns:
-            outcome = metadata_df[future_col].to_numpy().astype(float)
-            true_n_events = int(outcome.sum())
-            true_prevalence = float(true_n_events / len(outcome)) if len(outcome) > 0 else 0.0
-            logger.info(f"True prevalence ({future_col}): {true_n_events} / {len(outcome)} ({true_prevalence:.1%})")
-            try:
-                from sklearn.metrics import roc_auc_score
-                for est_name, est_arr in [("M0", M0), ("M1", M1), ("M2", M2)]:
-                    valid_mask = ~np.isnan(est_arr)
-                    if valid_mask.sum() > 0 and len(np.unique(outcome[valid_mask])) > 1:
-                        auc = roc_auc_score(outcome[valid_mask], est_arr[valid_mask])
-                        logger.info(f"AUC {est_name} vs {future_col}: {auc:.4f}")
-                    else:
-                        logger.info(f"AUC {est_name} vs {future_col}: N/A (single class)")
-            except ImportError:
-                logger.info("sklearn not available — skipping AUC computation")
-        else:
-            logger.info(f"No '{future_col}' column found — skipping AUC computation")
-
-        # Save results
+        # Save M1 trajectories
         if save_cfg.get("trajectories", True):
             traj_dir = output_dir / "trajectories"
-            save_trajectories(trajectories, traj_dir, config=gen_config)
-            logger.info(f"Saved trajectories to {traj_dir}")
-
-        if save_cfg.get("scores", True):
-            scores_path = output_dir / "scores.npz"
-            save_scores(results, scores_path)
-            logger.info(f"Saved scores to {scores_path}")
+            save_trajectories(m1_trajectories, traj_dir, config=gen_config)
+            logger.info(f"Saved M1 trajectories to {traj_dir}")
 
         # Human-readable summary
         summary = {
@@ -658,22 +785,10 @@ async def run_pipeline(cfg: dict):
             "n_samp": gen_config.n_samp,
             "methods": methods,
             "score_inline": score_inline,
-            "target_event": target_event_name,
-            "target_event_id": gen_config.target_event_id,
-            "tracked_name": gen_config.tracked_name,
-            "tracked_ids_len": len(gen_config.tracked_ids) if gen_config.tracked_ids else 0,
-            "wall_time_seconds": gen_elapsed,
             "m1_generated_tokens": m1_tokens,
-            "m2_generated_tokens": m2_tokens,
-            "total_generated_tokens": total_gen_tokens,
-            "m1_with_target_event": m1_with_event,
-            "m1_total_trajectories": m1_total,
-            "m1_event_rate": m1_with_event / m1_total if m1_total > 0 else 0.0,
-            "true_n_events": true_n_events,
-            "true_prevalence": true_prevalence,
-            "mean_M0": float(np.nanmean(M0)),
-            "mean_M1": float(np.nanmean(M1)),
-            "mean_M2": float(np.nanmean(M2)),
+            "wall_time_seconds": gen_elapsed,
+            "subject_ids": subject_ids,
+            "outcomes": outcomes_summary,
         }
         with open(output_dir / "run_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
@@ -718,7 +833,7 @@ def dry_run(cfg: dict):
             f"  tracked_ids ({len(gen_config.tracked_ids)}): "
             f"{gen_config.tracked_ids[:10]}{'...' if len(gen_config.tracked_ids) > 10 else ''}"
         )
-        logger.info(f"  tracked_name: {gen_config.tracked_name}")
+        logger.info(f"  tracked_names: {gen_config.tracked_names}")
 
     # Show outcome flag prevalence
     flag_cols = [c for c in metadata_df.columns if c != "subject_id"]

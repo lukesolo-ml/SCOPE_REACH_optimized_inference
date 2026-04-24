@@ -211,7 +211,10 @@ async def generate_trajectory(
 
     if traj_type == TrajectoryType.M1:
         stop_token_ids = list(config.end_token_ids)
-        stop_token_ids.append(config.target_event_id)
+        if config.tracked_ids:
+            stop_token_ids.extend(config.tracked_ids)
+        else:
+            stop_token_ids.append(config.target_event_id)
     else:
         logit_bias[config.target_event_id] = -10000
         stop_token_ids = list(config.end_token_ids)
@@ -319,7 +322,7 @@ async def generate_trajectory(
         occurred_flag = occ_flag
         occurred_index = occ_index
         inline_tracked_ids = list(config.tracked_ids)
-        inline_tracked_name = config.tracked_name
+        inline_tracked_name = config.tracked_names
 
     return GeneratedTrajectory(
         patient_idx=patient_idx,

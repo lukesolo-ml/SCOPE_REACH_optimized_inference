@@ -53,8 +53,8 @@ class GenerationConfig:
         tracked_ids: Vocabulary token IDs to compute inline SCOPE/REACH
             estimates for during generation. When set, the inline processor
             computes per-token SCOPE and REACH without a second scoring pass.
-        tracked_name: Optional label for the tracked token set (for downstream
-            keying / display).
+        tracked_names: Optional labels for each tracked token (for downstream
+            keying / display). Parallel to tracked_ids.
     """
 
     max_len: int
@@ -68,7 +68,7 @@ class GenerationConfig:
     max_time: float | None = None
     time_check_interval: int = 100
     tracked_ids: list[int] | None = None
-    tracked_name: str | None = None
+    tracked_names: list[str] | None = None
 
 
 @dataclass
@@ -96,7 +96,7 @@ class GeneratedTrajectory:
         occurred_flag: Whether each tracked token occurred (shape K).
         occurred_index: First-occurrence index per tracked token (-1 if none).
         inline_tracked_ids: Echo of tracked_ids used during generation.
-        inline_tracked_name: Echo of tracked_name used during generation.
+        inline_tracked_name: Echo of tracked_names used during generation.
     """
 
     patient_idx: int
@@ -112,7 +112,7 @@ class GeneratedTrajectory:
     occurred_flag: np.ndarray | None = None
     occurred_index: np.ndarray | None = None
     inline_tracked_ids: list[int] | None = None
-    inline_tracked_name: str | None = None
+    inline_tracked_name: list[str] | None = None
     n_new_tokens: int | None = None
 
 
