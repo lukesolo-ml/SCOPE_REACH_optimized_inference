@@ -178,6 +178,7 @@ async def generate_trajectory(
     patient_idx: int,
     sample_idx: int,
     traj_type: TrajectoryType,
+    stop_at_tracked_events: bool = True,
 ) -> GeneratedTrajectory:
     """Generate a single trajectory, optionally with inline SCOPE/REACH estimates.
 
@@ -212,7 +213,8 @@ async def generate_trajectory(
     if traj_type == TrajectoryType.M1:
         stop_token_ids = list(config.end_token_ids)
         if config.tracked_ids:
-            stop_token_ids.extend(config.tracked_ids)
+            if stop_at_tracked_events:
+                stop_token_ids.extend(config.tracked_ids)
         else:
             stop_token_ids.append(config.target_event_id)
     else:
