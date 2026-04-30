@@ -307,6 +307,8 @@ def _pad_to_2d(sample_lists: list[list[float]]) -> np.ndarray:
             out[i, : len(s)] = s
     return out
 
+SCORES_SCHEMA_VERSION = 2  # v1 = padded 2D; v2 = flat + offsets
+
 
 def save_scores(
     results: Sequence[PatientResults],
@@ -315,56 +317,119 @@ def save_scores(
     avg_m1_tokens: float | None = None,
     avg_m2_tokens: float | None = None,
 ) -> pathlib.Path:
-    """Save patient scores to disk.
+    """Save patient scores using flat + offsets layout (v2).
 
-    Saves per-patient mean scores (M0, M1, M2) and full per-timeline raw
-    samples (M0_raw, M1_raw, M2_raw) as NaN-padded 2D arrays for downstream
-    analysis (e.g. subsampling bootstraps). Optionally saves average token
-    costs per M1/M2 trajectory for token-efficiency comparisons.
-
-    Args:
-        results: Per-patient results from the scheduler.
-        output_path: Path for the output .npz file.
-        avg_m1_tokens: Average tokens generated per M1 trajectory.
-        avg_m2_tokens: Average tokens generated per M2 trajectory.
-
-    Returns:
-        Path to the saved file.
+    Per-patient samples are stored as concatenated flat arrays plus int64
+    offsets, avoiding the O(n_patients × max_len) blow-up of padded 2D.
     """
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    M0 = np.array([np.mean(r.m0_samples) if r.m0_samples else np.nan for r in results])
-    M1 = np.array([np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results])
-    M2 = np.array([np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results])
+    n = len(results)
 
-    M0_raw = _pad_to_2d([list(map(float, r.m0_samples)) for r in results])
-    M1_raw = _pad_to_2d([list(map(float, r.m1_samples)) for r in results])
-    M2_raw = _pad_to_2d([list(map(float, r.m2_samples)) for r in results])
+    # Per-patient means (cheap)
+    M0 = np.fromiter(
+        (np.mean(r.m0_samples) if r.m0_samples else np.nan for r in results),
+        count=n, dtype=np.float64,
+    )
+    M1 = np.fromiter(
+        (np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results),
+        count=n, dtype=np.float64,
+    )
+    M2 = np.fromiter(
+        (np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results),
+        count=n, dtype=np.float64,
+    )
 
-    save_kwargs: dict = dict(M0=M0, M1=M1, M2=M2, M0_raw=M0_raw, M1_raw=M1_raw, M2_raw=M2_raw)
+    def flatten(attr: str) -> tuple[np.ndarray, np.ndarray]:
+        # offsets[p+1] - offsets[p] = number of samples for patient p
+        lens = np.fromiter(
+            (len(getattr(r, attr)) for r in results), count=n, dtype=np.int64,
+        )
+        offsets = np.empty(n + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(lens, out=offsets[1:])
+        total = int(offsets[-1])
+        flat = np.empty(total, dtype=np.float32)
+        for i, r in enumerate(results):
+            samples = getattr(r, attr)
+            if samples:
+                # np.asarray handles list / ndarray / tuple equally
+                flat[offsets[i]:offsets[i + 1]] = np.asarray(samples, dtype=np.float32)
+        return flat, offsets
+
+    m0_flat, m0_offsets = flatten("m0_samples")
+    m1_flat, m1_offsets = flatten("m1_samples")
+    m2_flat, m2_offsets = flatten("m2_samples")
+
+    save_kwargs: dict = dict(
+        schema_version=np.array([SCORES_SCHEMA_VERSION], dtype=np.int32),
+        M0=M0, M1=M1, M2=M2,
+        M0_flat=m0_flat, M0_offsets=m0_offsets,
+        M1_flat=m1_flat, M1_offsets=m1_offsets,
+        M2_flat=m2_flat, M2_offsets=m2_offsets,
+    )
     if avg_m1_tokens is not None:
         save_kwargs["avg_m1_tokens"] = np.array([avg_m1_tokens], dtype=np.float64)
     if avg_m2_tokens is not None:
         save_kwargs["avg_m2_tokens"] = np.array([avg_m2_tokens], dtype=np.float64)
 
-    np.savez_compressed(output_path, **save_kwargs)
+    # Plain savez (no compression) — fast, mmap-friendly, no extra buffer copy.
+    # Use savez_compressed only if you specifically need disk size reduction
+    # AND have headroom for the transient compression buffer.
+    np.savez(output_path, **save_kwargs)
     return output_path
 
 
-def load_scores(
-    input_path: pathlib.Path | str,
-) -> dict[str, np.ndarray]:
-    """Load saved scores.
+def load_scores(input_path: pathlib.Path | str) -> dict[str, np.ndarray]:
+    """Load saved scores. Handles v1 (padded 2D) and v2 (flat+offsets) transparently.
 
-    Returns a dict with keys:
-        M0, M1, M2       — per-patient mean scores (always present)
-        M0_raw, M1_raw, M2_raw  — NaN-padded (n_patients × max_samples) arrays
-        avg_m1_tokens, avg_m2_tokens  — shape-(1,) float64 arrays (if saved)
+    For v2 files, reconstructs M{0,1,2}_raw as NaN-padded 2D on demand to keep
+    downstream code working. Skip the reconstruction for huge files by reading
+    the flat arrays directly via the *_flat / *_offsets keys.
     """
     data = np.load(input_path)
     result: dict = {"M0": data["M0"], "M1": data["M1"], "M2": data["M2"]}
-    for key in ("M0_raw", "M1_raw", "M2_raw", "avg_m1_tokens", "avg_m2_tokens"):
+
+    is_v2 = "schema_version" in data.files and int(data["schema_version"][0]) >= 2
+
+    if is_v2:
+        # Expose flat layout directly
+        for k in ("M0_flat", "M0_offsets",
+                  "M1_flat", "M1_offsets",
+                  "M2_flat", "M2_offsets"):
+            result[k] = data[k]
+
+        # Optional convenience: reconstruct padded 2D. Caller can skip this
+        # by reading flat arrays themselves if memory is tight.
+        def _reconstruct(flat: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+            lens = np.diff(offsets)
+            n = len(lens)
+            max_len = int(lens.max()) if n else 0
+            if max_len == 0:
+                return np.full((n, 0), np.nan, dtype=np.float32)
+            out = np.full((n, max_len), np.nan, dtype=np.float32)
+            for i in range(n):
+                L = int(lens[i])
+                if L:
+                    out[i, :L] = flat[offsets[i]:offsets[i] + L]
+            return out
+
+        # Only reconstruct if it fits — bail out at >32 GB and let caller use flat.
+        lens0 = np.diff(data["M0_offsets"])
+        max_len0 = int(lens0.max()) if len(lens0) else 0
+        est_bytes = len(lens0) * max_len0 * 4 * 3
+        if est_bytes < 32 * 2**30:
+            result["M0_raw"] = _reconstruct(data["M0_flat"], data["M0_offsets"])
+            result["M1_raw"] = _reconstruct(data["M1_flat"], data["M1_offsets"])
+            result["M2_raw"] = _reconstruct(data["M2_flat"], data["M2_offsets"])
+    else:
+        # v1 padded layout
+        for key in ("M0_raw", "M1_raw", "M2_raw"):
+            if key in data.files:
+                result[key] = data[key]
+
+    for key in ("avg_m1_tokens", "avg_m2_tokens"):
         if key in data.files:
             result[key] = data[key]
     return result
