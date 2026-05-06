@@ -49,7 +49,8 @@ async def generate_trajectories(
     engine: sgl.Engine,
     config: GenerationConfig,
     patient_tokens: Sequence[list[int]],
-    methods: list[str] = ["M1", "M2"]
+    methods: list[str] = ["M1", "M2"],
+    stop_at_tracked_events: bool = True,
 ) -> list[GeneratedTrajectory]:
     """Generate all M1 and M2 trajectories for a batch of patients.
 
@@ -61,6 +62,8 @@ async def generate_trajectories(
         engine: SGLang inference engine.
         config: Generation configuration.
         patient_tokens: List of tokenized patient timelines (one per patient).
+        stop_at_tracked_events: If False, M1 trajectories run to their natural
+            end token rather than stopping early when a tracked event occurs.
 
     Returns:
         List of all generated trajectories.
@@ -71,7 +74,8 @@ async def generate_trajectories(
             if "M1" in methods:
                 gen_tasks.append(
                     generate_trajectory(
-                        engine, config, tokens, patient_idx, sample_idx, TrajectoryType.M1
+                        engine, config, tokens, patient_idx, sample_idx, TrajectoryType.M1,
+                        stop_at_tracked_events=stop_at_tracked_events,
                     )
                 )
             if "M2" in methods:
