@@ -1,0 +1,97 @@
+# ============================================================================
+# SCOPE/REACH Inference Pipeline — TEST CONFIGURATION
+# ============================================================================
+# Runs on a small subset (~100 patients, 2 shards) to validate the full
+# sharded pipeline end-to-end before submitting a production array job.
+#
+# Intended usage:
+#   bash run_test_array.sh <PARTITION>
+#
+# After completion, open analysis.ipynb and set:
+#   OUTPUT_DIR = pathlib.Path("scope_reach_output_test/merged")
+
+# --- Paths (same as production) ---
+cocoa_outputs:
+  held_out_for_inference: /home/lsolo/paper_fast/new/standpipe/lib/cocoa/cocoa/processed/ucmc/held_out_for_inference.parquet
+  tokenizer_yaml: /home/lsolo/paper_fast/new/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
+
+# Model (same as production)
+model_path: /home/lsolo/paper_fast/new/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
+
+# Output directory — shards write to scope_reach_output_test/shard_000/ etc.
+# merge_shards.py writes the merged result to scope_reach_output_test/merged/
+output_dir: ./scope_reach_output_test
+
+# --- Cohort Selection ---
+cohort:
+  max_patients: 100          # Small subset: 50 patients per shard with 2 shards
+  shuffle_seed: 42
+  require_flag: null
+  exclude_flag: "DSCG//expired_past"
+
+# --- Generation Config ---
+generation:
+  max_len: 10000
+  n_samp: 100                # Same as production: 100 MC samples per patient
+  temperature: 1.0
+  score_inline: true
+  methods:
+    - M1
+    - M2
+
+  tracked_events:
+    - XFR-IN//icu
+    - RESP//imv
+    - DSCG//expired
+    - LAB-RES//sodium_Q0
+    - LAB-RES//sodium_Q9
+    - LAB-RES//potassium_Q0
+    - LAB-RES//potassium_Q9
+    - LAB-RES//hemoglobin_Q0
+    - LAB-RES//glucose_serum_Q0
+    - VTL//heart_rate_Q9
+    - ASMT//cam_total_positive
+
+  end_tokens:
+    prefixes:
+      - DSCG
+    names: []
+
+  suppressed_tokens:
+    - BOS
+
+  time_stopping:
+    enabled: false
+    trunc_token: UNK
+    max_time_minutes: 14400000000000000.0
+    time_check_interval: 100
+    time_token_bounds:
+      "TIME//5m-15m": [5, 15]
+      "TIME//15m-1h": [15, 60]
+      "TIME//1h-2h": [60, 120]
+      "TIME//2h-6h": [120, 360]
+      "TIME//6h-12h": [360, 720]
+      "TIME//12h-1d": [720, 1440]
+      "TIME//1d-3d": [1440, 4320]
+      "TIME//3d-1w": [4320, 10080]
+      "TIME//1w-2w": [10080, 20160]
+      "TIME//2w-1mt": [20160, 43200]
+      "TIME//1mt-3mt": [43200, 129600]
+      "TIME//3mt-6mt": [129600, 259200]
+      "TIME//6mt+": [259200, 518400]
+
+# --- Engine ---
+engine:
+  mem_fraction: 0.85          # Slightly lower than production for test/shared nodes
+  patient_chunk_size: 10
+  extra_kwargs: {}
+
+# --- Prompt Handling ---
+prompt_overflow: truncate_left
+
+# --- Saving ---
+save:
+  trajectories: true
+  scores: true
+  patient_index: true
+  config_snapshot: true

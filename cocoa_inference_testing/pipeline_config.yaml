@@ -7,19 +7,19 @@
 # --- Paths ---
 cocoa_outputs:
   # The winnower output — contains tokens_past (prompts), outcome flags, etc.
-  held_out_for_inference: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/held_out_for_inference.parquet
+  held_out_for_inference: /home/lsolo/paper_fast/new/standpipe/lib/cocoa/cocoa/processed/ucmc/held_out_for_inference.parquet
   # The tokenizer artifact — used to resolve token names to IDs.
-  tokenizer_yaml: /mnt/bbj-lab/users/lsolo/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
+  tokenizer_yaml: /home/lsolo/paper_fast/new/standpipe/lib/cocoa/cocoa/processed/tokenizer.yaml
 
 # Model
 model_path: /home/lsolo/paper_fast/new/standpipe/lib/cotorra/cotorra/out/mdl-cotorra-sco_re-final
 
 # Output directory (trajectories, scores, metadata saved here)
-output_dir: ./scope_reach_output
+output_dir: ./scope_reach_output_ucmc
 
 # --- Cohort Selection ---
 cohort:
-  max_patients: null          # null = use all; integer to subsample
+  max_patients: 500          # null = use all; integer to subsample
   shuffle_seed: 42            # seed for subsampling if max_patients is set
   # Optional outcome-based filters (applied to the winnower's boolean flags).
   # These reference the columns produced by the winnower, e.g.:
@@ -52,10 +52,6 @@ generation:
     - LAB-RES//hemoglobin_Q0 #anemia
     - LAB-RES//glucose_serum_Q0 #Hypoglycemia
     - VTL//heart_rate_Q9 #Tachycardia
-    - SOFA//resp-4 #Sofa resp 4
-    - SOFA//renal-4 #Sofa renal 4
-    - SOFA//liver-4 #Sofa liver 4
-    - SOFA//cv-4 #Sofa cardiovascular 4
     - ASMT//cam_total_positive # Positive confusion score
 
   # End tokens: tokens that naturally terminate a sequence.

@@ -1,27 +1,39 @@
 #!/usr/bin/env python3
-"""SCOPE/REACH inference pipeline for cocoa-tokenized EHR timelines.
+"""SCOPE/REACH inference pipeline for cocoa-tokenized EHR timelines — sharded variant.
 
-Reads the winnowed held-out data produced by cocoa's Winnower
-(held_out_for_inference.parquet), which already contains:
+Identical to run_timelines.py but adds --shard-idx / --n-shards arguments so this
+script can be called by a SLURM array job.  Each shard processes a deterministic
+1/N slice of the cohort and writes results to a shard-specific subdirectory:
 
-  - tokens_past: the prompt (timeline up to the threshold)
-  - tokens_future: ground truth (timeline after the threshold)
-  - outcome flags: boolean columns like DSCG//expired_future
+    {output_dir}/shard_{shard_idx:03d}/
 
-Builds a GenerationConfig from a YAML file, runs SCOPE/REACH trajectory
-generation and scoring via quick_sco_re, and persists results to disk.
+A separate merge_shards.py script combines the shard outputs into a single directory
+that analysis.ipynb can read directly.
 
-Scoring modes
--------------
-  - two-pass (default): generate trajectories, then run a separate prefill-only
-    forward pass to extract P(target_event) logprobs and compute SCOPE/REACH.
-  - inline (score_inline=True): compute SCOPE/REACH during generation via
-    token_ids_logprob. Per-trajectory estimates are attached directly to
-    GeneratedTrajectory.
+Sharding logic
+--------------
+All shards load the same filtered/subsampled patient list (identical seed), then each
+shard takes an interleaved stride:
 
-Usage:
-    python run_pipeline.py --config pipeline_config.yaml
-    python run_pipeline.py --config pipeline_config.yaml --dry-run
+    shard i  →  patients at positions i, i+N, i+2N, ...
+
+This guarantees:
+  - Disjoint, collectively exhaustive coverage.
+  - No shard needs to know what the others did.
+  - Missing shards are tolerable: merge_shards.py skips absent shard dirs.
+
+Usage
+-----
+    # Single shard (shard 3 of 8):
+    python run_timelines_shard.py --config pipeline_config.yaml \\
+        --shard-idx 3 --n-shards 8
+
+    # Dry-run (no GPU needed):
+    python run_timelines_shard.py --config pipeline_config.yaml \\
+        --shard-idx 0 --n-shards 2 --dry-run
+
+    # No sharding (identical to run_timelines.py):
+    python run_timelines_shard.py --config pipeline_config.yaml
 """
 
 import argparse
@@ -495,7 +507,7 @@ def aggregate_inline_results(
 # Pipeline execution
 # ---------------------------------------------------------------------------
 
-async def run_pipeline(cfg: dict):
+async def run_pipeline(cfg: dict, shard_idx: int | None = None, n_shards: int | None = None):
     start_time = time.time()
 
     vocab = CocoaVocab(cfg["cocoa_outputs"]["tokenizer_yaml"])
@@ -506,10 +518,30 @@ async def run_pipeline(cfg: dict):
         logger.error("No patients to process — exiting")
         return
 
+    # --- Shard selection ---
+    if shard_idx is not None:
+        full_n = len(patient_tokens)
+        indices = list(range(shard_idx, full_n, n_shards))
+        patient_tokens = [patient_tokens[j] for j in indices]
+        subject_ids = [subject_ids[j] for j in indices]
+        metadata_df = metadata_df[indices]
+        logger.info(
+            f"Shard {shard_idx}/{n_shards}: selected {len(patient_tokens)} patients "
+            f"(stride {n_shards} from position {shard_idx} of {full_n} total)"
+        )
+        if not patient_tokens:
+            logger.warning(f"Shard {shard_idx} has no patients — exiting cleanly")
+            return
+
     gen_config, score_inline = build_generation_config(cfg, vocab)
     methods = cfg["generation"].get("methods", ["M1", "M2"])
 
-    output_dir = pathlib.Path(cfg["output_dir"]).expanduser().resolve()
+    # Output dir: base/shard_NNN when sharding, else base directly
+    base_output_dir = pathlib.Path(cfg["output_dir"]).expanduser().resolve()
+    if shard_idx is not None:
+        output_dir = base_output_dir / f"shard_{shard_idx:03d}"
+    else:
+        output_dir = base_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Output directory: {output_dir}")
 
@@ -606,6 +638,9 @@ async def run_pipeline(cfg: dict):
             for evt_id in tracked_ids_list
         ] if score_inline else []
 
+        # Target for RAM scaling estimate: this shard's actual workload
+        _tl_target = n_patients * gen_config.n_samp
+
         with logging_redirect_tqdm():
             with tqdm(total=n_patients, desc="Generating", unit="pt", dynamic_ncols=True) as pbar:
                 for chunk_start in range(0, n_patients, chunk_size):
@@ -687,13 +722,13 @@ async def run_pipeline(cfg: dict):
                         _rss_mb = _proc.memory_info().rss / 1024**2
                         _var_mb = max(0.0, _rss_mb - _baseline_rss_mb)
                         _tl_done = chunk_end * gen_config.n_samp
-                        _tl_target = 97_000 * 100
                         _scale = _tl_target / _tl_done if _tl_done > 0 else float("inf")
                         _est_mb = _baseline_rss_mb + _var_mb * _scale
                         print(
                             f"[Chunk {chunk_end}/{n_patients}] "
                             f"RAM: {_rss_mb:.0f} MB  (+{_var_mb:.0f} MB variable) | "
-                            f"Est. for 97k×100: {_est_mb:.0f} MB ({_est_mb/1024:.1f} GB)"
+                            f"Est. for full shard ({n_patients}×{gen_config.n_samp}): "
+                            f"{_est_mb:.0f} MB ({_est_mb/1024:.1f} GB)"
                         )
 
         gen_elapsed = time.time() - gen_start
@@ -828,6 +863,9 @@ async def run_pipeline(cfg: dict):
             "wall_time_seconds": gen_elapsed,
             "subject_ids": subject_ids,
             "outcomes": outcomes_summary,
+            # Shard metadata (None when not sharding)
+            "shard_idx": shard_idx,
+            "n_shards": n_shards,
         }
         with open(output_dir / "run_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
@@ -844,7 +882,7 @@ async def run_pipeline(cfg: dict):
 # Dry-run mode
 # ---------------------------------------------------------------------------
 
-def dry_run(cfg: dict):
+def dry_run(cfg: dict, shard_idx: int | None = None, n_shards: int | None = None):
     logger.info("=== DRY RUN ===")
 
     vocab = CocoaVocab(cfg["cocoa_outputs"]["tokenizer_yaml"])
@@ -853,6 +891,20 @@ def dry_run(cfg: dict):
     patient_tokens, subject_ids, metadata_df = load_winnowed_data(cfg, vocab)
     gen_config, score_inline = build_generation_config(cfg, vocab)
     methods = cfg["generation"].get("methods", ["M1", "M2"])
+
+    full_n = len(patient_tokens)
+
+    if shard_idx is not None:
+        indices = list(range(shard_idx, full_n, n_shards))
+        patient_tokens = [patient_tokens[j] for j in indices]
+        subject_ids = [subject_ids[j] for j in indices]
+        metadata_df = metadata_df[indices]
+        logger.info(
+            f"Shard {shard_idx}/{n_shards}: {len(patient_tokens)} patients "
+            f"(of {full_n} total; stride {n_shards} from position {shard_idx})"
+        )
+        logger.info(f"  First subject_id: {subject_ids[0] if subject_ids else 'N/A'}")
+        logger.info(f"  Last  subject_id: {subject_ids[-1] if subject_ids else 'N/A'}")
 
     n_traj = len(patient_tokens) * gen_config.n_samp * len(methods)
     logger.info(f"Would generate {n_traj} trajectories for {len(patient_tokens)} patients")
@@ -891,7 +943,7 @@ def dry_run(cfg: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run SCOPE/REACH inference on cocoa winnowed held-out timelines.",
+        description="Run SCOPE/REACH inference on cocoa winnowed held-out timelines (sharded).",
     )
     parser.add_argument("--config", "-c", type=str, required=True,
                         help="Path to pipeline YAML config file.")
@@ -902,13 +954,31 @@ def main():
     parser.add_argument("--max-patients", type=int, default=None,
                         help="Override cohort.max_patients")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Override output_dir")
+                        help="Override output_dir (shard subdir is appended automatically)")
     parser.add_argument("--score-inline", action="store_true", default=None,
                         help="Enable single-pass inline scoring (override generation.score_inline)")
     parser.add_argument("--no-score-inline", action="store_true", default=None,
                         help="Force two-pass scoring (override generation.score_inline)")
+    # Sharding arguments
+    parser.add_argument("--shard-idx", type=int, default=None,
+                        help="0-indexed shard number for this SLURM array task. "
+                             "Must be used together with --n-shards.")
+    parser.add_argument("--n-shards", type=int, default=None,
+                        help="Total number of shards in the array job. "
+                             "Must be used together with --shard-idx.")
 
     args = parser.parse_args()
+
+    # Validate shard arguments
+    if (args.shard_idx is None) != (args.n_shards is None):
+        parser.error("--shard-idx and --n-shards must be used together")
+    if args.shard_idx is not None:
+        if args.shard_idx < 0:
+            parser.error("--shard-idx must be >= 0")
+        if args.n_shards < 1:
+            parser.error("--n-shards must be >= 1")
+        if args.shard_idx >= args.n_shards:
+            parser.error(f"--shard-idx ({args.shard_idx}) must be < --n-shards ({args.n_shards})")
 
     cfg = load_config(args.config)
 
@@ -923,10 +993,13 @@ def main():
     elif args.no_score_inline:
         cfg["generation"]["score_inline"] = False
 
+    shard_idx = args.shard_idx
+    n_shards = args.n_shards
+
     if args.dry_run:
-        dry_run(cfg)
+        dry_run(cfg, shard_idx=shard_idx, n_shards=n_shards)
     else:
-        asyncio.run(run_pipeline(cfg))
+        asyncio.run(run_pipeline(cfg, shard_idx=shard_idx, n_shards=n_shards))
 
 
 if __name__ == "__main__":

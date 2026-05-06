@@ -37,11 +37,15 @@ Requirements when using time-based stopping:
       TODO: This isn't particularly robust since not every vocab will have such an id
 """
 
+import logging
+
 import numpy as np
 import sglang as sgl
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
 from .structures import GeneratedTrajectory, GenerationConfig, TrajectoryType
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Deferred time-horizon logit processor
@@ -202,7 +206,22 @@ async def generate_trajectory(
         A GeneratedTrajectory with generated token IDs, metadata, and
         (when config.tracked_ids is set) inline SCOPE/REACH estimates.
     """
-    max_new = config.max_len - len(prompt_tokens) - 1
+    # SGLang's effective per-request budget is context_length - max_new_tokens - K
+    # where K ≈ 4-6 (internal KV-cache overhead). Using -1 for max_new causes the
+    # request to be rejected when the prompt is long. Reserving 8 extra slots is a
+    # uniform constant applied to every request — it reduces generation headroom
+    # by 8 tokens across the board, introducing no per-patient bias.
+    _SGLANG_OVERHEAD = 8
+    max_new = config.max_len - len(prompt_tokens) - 1 - _SGLANG_OVERHEAD
+    if max_new < 1:
+        # Prompt alone exhausts the budget. Left-truncate oldest history to free
+        # space — the removed tokens are the most distant past, uniform across patients.
+        prompt_tokens = prompt_tokens[-(config.max_len - _SGLANG_OVERHEAD - 2):]
+        max_new = 1
+        logger.warning(
+            "Prompt left-truncated to %d tokens (patient=%d sample=%d traj=%s)",
+            len(prompt_tokens), patient_idx, sample_idx, traj_type.value,
+        )
     use_time_stopping = config.max_time is not None and config.trunc_id is not None
     use_inline_sr = config.tracked_ids is not None
 
@@ -375,7 +394,7 @@ async def generate_m2_from_m1_trajectory(
     Returns:
         An M2 GeneratedTrajectory derived from the M1 trajectory.
     """
-    if m1_traj.timeline_terminating_id != config.target_event_id:
+    if config.target_event_id not in m1_traj.output_ids:
         return GeneratedTrajectory(
             patient_idx=m1_traj.patient_idx,
             sample_idx=m1_traj.sample_idx,
@@ -395,7 +414,6 @@ async def generate_m2_from_m1_trajectory(
         prefix_ids = m1_traj.output_ids[:cut]
     else:
         prefix_ids = list(m1_traj.output_ids)
-
     continuation = await generate_trajectory(
         engine=engine,
         config=config,
@@ -409,6 +427,32 @@ async def generate_m2_from_m1_trajectory(
         None if continuation.truncation_idx is None
         else len(prefix_ids) + continuation.truncation_idx
     )
+
+    if logger.isEnabledFor(logging.DEBUG):
+        _W = 30  # window of tokens to show on each side of the split
+        m1_at_and_after = list(m1_traj.output_ids[cut:])
+        m2_continuation = list(continuation.output_ids)
+
+        def _fmt(ids: list[int], w: int) -> str:
+            if len(ids) <= w:
+                return str(ids)
+            return f"{ids[:w // 2]} ... {ids[-(w // 2):]} (len={len(ids)})"
+
+        logger.debug(
+            "\n"
+            "┌─ REACH regen  patient=%-4d  sample=%-4d  tracked_id=%d\n"
+            "│  shared prefix  : %d toks  %s\n"
+            "│  M1 from split  : %s\n"
+            "│  M2 continuation: %s\n"
+            "└─ end",
+            m1_traj.patient_idx,
+            m1_traj.sample_idx,
+            target_id,
+            len(prefix_ids),
+            _fmt(prefix_ids, _W),
+            _fmt(m1_at_and_after, _W),
+            _fmt(m2_continuation, _W),
+        )
 
     return GeneratedTrajectory(
         patient_idx=m1_traj.patient_idx,
