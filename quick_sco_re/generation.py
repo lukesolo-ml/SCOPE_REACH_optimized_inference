@@ -375,7 +375,7 @@ async def generate_m2_from_m1_trajectory(
     Returns:
         An M2 GeneratedTrajectory derived from the M1 trajectory.
     """
-    if m1_traj.timeline_terminating_id != config.target_event_id:
+    if config.target_event_id not in m1_traj.output_ids:
         return GeneratedTrajectory(
             patient_idx=m1_traj.patient_idx,
             sample_idx=m1_traj.sample_idx,

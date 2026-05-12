@@ -96,7 +96,9 @@ from quick_sco_re import (
     create_engine,
     generate_and_score,
     generate_trajectories,
+    generate_m2_from_m1_trajectory,
     generate_m2_from_m1_trajectories,
+    score_trajectory,
     score_trajectories,
     aggregate_results,
     save_trajectories,
@@ -466,9 +468,11 @@ def aggregate_inline_results(
             continue
 
         if traj.traj_type == TrajectoryType.M1:
-            results[traj.patient_idx].m0_samples.append(
-                traj.timeline_terminating_id == target_id
-            )
+            if traj.occurred_flag is not None:
+                m0 = bool(traj.occurred_flag[k])
+            else:
+                m0 = traj.timeline_terminating_id == target_id
+            results[traj.patient_idx].m0_samples.append(m0)
             scope = float(traj.scope_estimates[k]) if traj.scope_estimates is not None else 0.0
             results[traj.patient_idx].m1_samples.append(scope)
         else:
@@ -536,7 +540,8 @@ async def run_pipeline(cfg: dict):
         logger.info("Running warmup pass...")
         warmup_tokens = patient_tokens[:min(2, len(patient_tokens))]
         if score_inline:
-            warmup_m1 = await generate_trajectories(engine, gen_config, warmup_tokens, ["M1"])
+            warmup_m1 = await generate_trajectories(engine, gen_config, warmup_tokens, ["M1"],
+                                                    stop_at_tracked_events=False)
             if "M2" in methods and gen_config.tracked_ids:
                 first_outcome_config = dataclasses.replace(gen_config, target_event_id=gen_config.tracked_ids[0])
                 warmup_m2 = await generate_m2_from_m1_trajectories(engine, first_outcome_config, warmup_m1, warmup_tokens)
@@ -581,9 +586,17 @@ async def run_pipeline(cfg: dict):
 
         gen_start = time.time()
         m1_trajectories: list = []
+        # Global patient index for each entry in m1_trajectories (needed for post-loop M2 pass).
+        # Trajectories carry a chunk-relative patient_idx; this maps them back to the full list.
+        m1_global_idxs: list[int] = []
         all_results: list[list[PatientResults]] = [[] for _ in range(n_outcomes)]
         per_outcome_m2_tokens: list[int] = [0] * n_outcomes
         per_outcome_m2_count: list[int] = [0] * n_outcomes
+
+        outcome_configs = [
+            dataclasses.replace(gen_config, target_event_id=evt_id)
+            for evt_id in tracked_ids_list
+        ] if score_inline else []
 
         with logging_redirect_tqdm():
             with tqdm(total=n_patients, desc="Generating", unit="pt", dynamic_ncols=True) as pbar:
@@ -592,66 +605,19 @@ async def run_pipeline(cfg: dict):
                     chunk_tokens = patient_tokens[chunk_start:chunk_end]
 
                     if score_inline:
-                        chunk_m1 = await generate_trajectories(engine, gen_config, chunk_tokens, ["M1"])
+                        # M1 runs to natural completion — tracked events are NOT stop tokens.
+                        # M2 regeneration for trajectories where an event occurred is deferred
+                        # to the post-loop bulk pass below.
+                        chunk_m1 = await generate_trajectories(engine, gen_config, chunk_tokens, ["M1"],
+                                                               stop_at_tracked_events=False)
                         m1_trajectories.extend(chunk_m1)
+                        for traj in chunk_m1:
+                            m1_global_idxs.append(chunk_start + traj.patient_idx)
 
-                        outcome_configs = [
-                            dataclasses.replace(gen_config, target_event_id=evt_id)
-                            for evt_id in tracked_ids_list
-                        ]
                         outcome_m1_results_list = [
                             aggregate_inline_results(chunk_m1, len(chunk_tokens), oc)
                             for oc in outcome_configs
                         ]
-
-                        if "M2" in methods:
-                            # For non-event M1 trajectories: inline REACH is already available —
-                            # no scoring pass needed. Only regenerate where the event occurred.
-                            regen_per_outcome: list[list] = [[] for _ in tracked_ids_list]
-                            for k, (evt_id, om1r) in enumerate(
-                                zip(tracked_ids_list, outcome_m1_results_list)
-                            ):
-                                past_mask_k = outcome_past_masks[k]
-                                for traj in chunk_m1:
-                                    if past_mask_k[chunk_start + traj.patient_idx]:
-                                        continue
-                                    if traj.timeline_terminating_id == evt_id:
-                                        regen_per_outcome[k].append(traj)
-                                    elif (
-                                        traj.inline_tracked_ids is not None
-                                        and traj.reach_estimates is not None
-                                    ):
-                                        try:
-                                            ki = traj.inline_tracked_ids.index(evt_id)
-                                            om1r[traj.patient_idx].m2_samples.append(
-                                                float(traj.reach_estimates[ki])
-                                            )
-                                        except (ValueError, IndexError):
-                                            pass
-
-                            # Regenerate M2 for all outcomes in parallel
-                            regen_m2_lists = await asyncio.gather(*[
-                                generate_m2_from_m1_trajectories(engine, oc, regen, chunk_tokens)
-                                for oc, regen in zip(outcome_configs, regen_per_outcome)
-                            ])
-
-                            # Score all regenerated M2s in parallel across outcomes
-                            scored_regen_lists = await asyncio.gather(*[
-                                score_trajectories(engine, oc, regen_m2, chunk_tokens)
-                                for oc, regen_m2 in zip(outcome_configs, regen_m2_lists)
-                            ])
-
-                            for k, (regen_m2, scored_regen) in enumerate(
-                                zip(regen_m2_lists, scored_regen_lists)
-                            ):
-                                per_outcome_m2_tokens[k] += sum(
-                                    t.n_new_tokens or 0 for t in regen_m2
-                                )
-                                per_outcome_m2_count[k] += len(regen_m2)
-                                om1r = outcome_m1_results_list[k]
-                                for st in scored_regen:
-                                    om1r[st.trajectory.patient_idx].m2_samples.append(st.score)
-
                         for k, om1r in enumerate(outcome_m1_results_list):
                             all_results[k].extend(om1r)
 
@@ -668,6 +634,44 @@ async def run_pipeline(cfg: dict):
                         all_results[0].extend(chunk_results)
 
                     pbar.update(len(chunk_tokens))
+
+        # Post-loop M2 pass (inline path only).
+        # Scan all M1 output_ids to find where each tracked event occurred, queue M2
+        # regenerations for those trajectories, and run them all in one parallel batch.
+        if score_inline and "M2" in methods and tracked_ids_list:
+            regen_queue: list[tuple] = []  # (m1_traj, global_idx, k, outcome_config)
+            for traj, global_idx in zip(m1_trajectories, m1_global_idxs):
+                if traj.inline_tracked_ids is None or traj.reach_estimates is None:
+                    continue
+                for k, (evt_id, oc) in enumerate(zip(tracked_ids_list, outcome_configs)):
+                    if outcome_past_masks[k][global_idx]:
+                        continue
+                    try:
+                        ki = traj.inline_tracked_ids.index(evt_id)
+                    except ValueError:
+                        continue
+                    if evt_id in traj.output_ids:
+                        regen_queue.append((traj, global_idx, k, oc))
+                    else:
+                        all_results[k][global_idx].m2_samples.append(float(traj.reach_estimates[ki]))
+
+            logger.info(
+                f"M2 pass: {len(regen_queue)} regen requests across "
+                f"{n_outcomes} outcome(s) × {len(m1_trajectories)} trajectories"
+            )
+            if regen_queue:
+                m2_trajs = list(await asyncio.gather(*[
+                    generate_m2_from_m1_trajectory(engine, oc, traj, patient_tokens[global_idx])
+                    for traj, global_idx, _, oc in regen_queue
+                ]))
+                scored_m2 = list(await asyncio.gather(*[
+                    score_trajectory(engine, oc, m2_traj, patient_tokens[global_idx])
+                    for (_, global_idx, _, oc), m2_traj in zip(regen_queue, m2_trajs)
+                ]))
+                for (traj, global_idx, k, oc), st in zip(regen_queue, scored_m2):
+                    all_results[k][global_idx].m2_samples.append(st.score)
+                    per_outcome_m2_tokens[k] += st.trajectory.n_new_tokens or 0
+                    per_outcome_m2_count[k] += 1
 
         gen_elapsed = time.time() - gen_start
         logger.info(f"Generation + scoring completed in {gen_elapsed:.1f}s")
