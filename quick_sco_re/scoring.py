@@ -134,10 +134,15 @@ async def score_trajectory(
     )
 
     # Collect logprobs from input positions (the generated tokens are in
-    # the "input" of this prefill-only pass)
+    # the "input" of this prefill-only pass).
+    # logprob_start_len=prompt_len-1 returns T+1 entries: one per scoring_ids
+    # position plus one extra predicting what would follow the last token.
+    # That final "what comes next" probability must not contribute to either
+    # SCOPE (sum) or REACH (1-prod), so trim to exactly len(scoring_ids).
     dscg_logprobs = _extract_token_logprobs(
         score_output, config.target_event_id, source="input", skip=0
     )
+    dscg_logprobs = dscg_logprobs[:len(scoring_ids)]
 
     if not dscg_logprobs:
         return ScoredTrajectory(trajectory=traj, score=0.0)

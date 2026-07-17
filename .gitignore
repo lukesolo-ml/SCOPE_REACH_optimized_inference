@@ -12,6 +12,9 @@ build/
 # SLURM output logs
 slurm/output/
 
+cocoa_inference_testing/scope_reach_output
+
+cocoa_inference_testing/trajectories
 # IDE
 .vscode/
 .idea/

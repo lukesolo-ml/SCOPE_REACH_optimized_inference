@@ -8,12 +8,18 @@ Roundtrip correctness is validated by bench_io_roundtrip.
 """
 
 import json
+import logging
 import pathlib
+import warnings
 from typing import Sequence
 
 import numpy as np
 
 from .structures import GeneratedTrajectory, GenerationConfig, PatientResults, TrajectoryType
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 2  # Bumped from implicit v1 to v2 for inline SCOPE/REACH fields
 
 
 def save_trajectories(
@@ -58,6 +64,20 @@ def save_trajectories(
 
     timeline_terminating_ids = []
 
+    # Inline SCOPE/REACH fields (variable-length per row, stored as flat + offsets)
+    scope_flat = []
+    scope_offsets = [0]
+    reach_flat = []
+    reach_offsets = [0]
+    occurred_flag_flat = []
+    occurred_flag_offsets = [0]
+    occurred_index_flat = []
+    occurred_index_offsets = [0]
+    tracked_ids_flat = []
+    tracked_ids_offsets = [0]
+    tracked_names = []
+    has_inline_sr = False
+
     for traj in trajectories:
         patient_idxs.append(traj.patient_idx)
         sample_idxs.append(traj.sample_idx)
@@ -73,8 +93,33 @@ def save_trajectories(
         output_ids_flat.extend(traj.output_ids)
         output_ids_offsets.append(len(output_ids_flat))
 
-    np.savez_compressed(
-        output_dir / "trajectories.npz",
+        # Inline SCOPE/REACH arrays
+        if traj.scope_estimates is not None:
+            has_inline_sr = True
+            scope_flat.extend(traj.scope_estimates.tolist())
+            reach_flat.extend(traj.reach_estimates.tolist())
+            occurred_flag_flat.extend(traj.occurred_flag.tolist())
+            occurred_index_flat.extend(traj.occurred_index.tolist())
+        scope_offsets.append(len(scope_flat))
+        reach_offsets.append(len(reach_flat))
+        occurred_flag_offsets.append(len(occurred_flag_flat))
+        occurred_index_offsets.append(len(occurred_index_flat))
+
+        if traj.inline_tracked_ids is not None:
+            has_inline_sr = True
+            tracked_ids_flat.extend(traj.inline_tracked_ids)
+        tracked_ids_offsets.append(len(tracked_ids_flat))
+
+        name = traj.inline_tracked_name
+        if name is None:
+            tracked_names.append("")
+        elif isinstance(name, list):
+            tracked_names.append("|".join(name))
+        else:
+            tracked_names.append(str(name))
+
+    save_dict = dict(
+        schema_version=np.array([SCHEMA_VERSION], dtype=np.int32),
         patient_idx=np.array(patient_idxs, dtype=np.int32),
         sample_idx=np.array(sample_idxs, dtype=np.int32),
         traj_type=np.array(traj_types, dtype="U2"),
@@ -85,6 +130,23 @@ def save_trajectories(
         output_ids_flat=np.array(output_ids_flat, dtype=np.int32),
         output_ids_offsets=np.array(output_ids_offsets, dtype=np.int64),
     )
+
+    if has_inline_sr:
+        save_dict.update(
+            scope_flat=np.array(scope_flat, dtype=np.float64),
+            scope_offsets=np.array(scope_offsets, dtype=np.int64),
+            reach_flat=np.array(reach_flat, dtype=np.float64),
+            reach_offsets=np.array(reach_offsets, dtype=np.int64),
+            occurred_flag_flat=np.array(occurred_flag_flat, dtype=bool),
+            occurred_flag_offsets=np.array(occurred_flag_offsets, dtype=np.int64),
+            occurred_index_flat=np.array(occurred_index_flat, dtype=np.int64),
+            occurred_index_offsets=np.array(occurred_index_offsets, dtype=np.int64),
+            tracked_ids_flat=np.array(tracked_ids_flat, dtype=np.int32),
+            tracked_ids_offsets=np.array(tracked_ids_offsets, dtype=np.int64),
+            tracked_name=np.array(tracked_names, dtype="U256"),
+        )
+
+    np.savez_compressed(output_dir / "trajectories.npz", **save_dict)
 
     if config is not None:
         config_dict = {
@@ -100,6 +162,8 @@ def save_trajectories(
             },
             "max_time": config.max_time,
             "time_check_interval": config.time_check_interval,
+            "tracked_ids": config.tracked_ids,
+            "tracked_names": config.tracked_names,
         }
         with open(output_dir / "config.json", "w") as f:
             json.dump(config_dict, f, indent=2)
@@ -120,7 +184,7 @@ def load_trajectories(
     """
     input_dir = pathlib.Path(input_dir)
 
-    data = np.load(input_dir / "trajectories.npz")
+    data = np.load(input_dir / "trajectories.npz", allow_pickle=False)
     patient_idxs = data["patient_idx"]
     sample_idxs = data["sample_idx"]
     traj_types = data["traj_type"]
@@ -143,6 +207,17 @@ def load_trajectories(
     output_ids_flat = data["output_ids_flat"]
     output_ids_offsets = data["output_ids_offsets"]
 
+    # Inline SCOPE/REACH fields (optional — absent in v1 files)
+    has_inline_sr = "scope_flat" in data.files
+    if not has_inline_sr and len(patient_idxs) > 0:
+        # Check if this is an old file missing the new fields
+        if "schema_version" not in data.files:
+            warnings.warn(
+                "Loading trajectories without inline SCOPE/REACH fields "
+                "(pre-v2 schema). Inline estimates will be None.",
+                stacklevel=2,
+            )
+
     trajectories = []
     for i in range(len(patient_idxs)):
         start = output_ids_offsets[i]
@@ -151,6 +226,38 @@ def load_trajectories(
 
         trunc_idx_val = int(truncation_idxs[i])
         term_id_val = int(timeline_terminating_ids[i])
+
+        # Inline SCOPE/REACH fields
+        scope_estimates = None
+        reach_estimates = None
+        occurred_flag = None
+        occurred_index = None
+        inline_tracked_ids = None
+        inline_tracked_name = None
+
+        if has_inline_sr:
+            s_start = int(data["scope_offsets"][i])
+            s_end = int(data["scope_offsets"][i + 1])
+            if s_end > s_start:
+                scope_estimates = data["scope_flat"][s_start:s_end].astype(np.float64)
+                reach_estimates = data["reach_flat"][
+                    int(data["reach_offsets"][i]):int(data["reach_offsets"][i + 1])
+                ].astype(np.float64)
+                occurred_flag = data["occurred_flag_flat"][
+                    int(data["occurred_flag_offsets"][i]):int(data["occurred_flag_offsets"][i + 1])
+                ].astype(bool)
+                occurred_index = data["occurred_index_flat"][
+                    int(data["occurred_index_offsets"][i]):int(data["occurred_index_offsets"][i + 1])
+                ].astype(np.int64)
+
+            t_start = int(data["tracked_ids_offsets"][i])
+            t_end = int(data["tracked_ids_offsets"][i + 1])
+            if t_end > t_start:
+                inline_tracked_ids = data["tracked_ids_flat"][t_start:t_end].tolist()
+
+            name_val = str(data["tracked_name"][i])
+            if name_val:
+                inline_tracked_name = name_val.split("|")
 
         trajectories.append(
             GeneratedTrajectory(
@@ -162,6 +269,12 @@ def load_trajectories(
                 timeline_terminating_id=term_id_val if term_id_val >= 0 else None,
                 was_time_truncated=bool(was_time_truncateds[i]),
                 truncation_idx=trunc_idx_val if trunc_idx_val >= 0 else None,
+                scope_estimates=scope_estimates,
+                reach_estimates=reach_estimates,
+                occurred_flag=occurred_flag,
+                occurred_index=occurred_index,
+                inline_tracked_ids=inline_tracked_ids,
+                inline_tracked_name=inline_tracked_name,
             )
         )
 
@@ -181,18 +294,39 @@ def load_trajectories(
     return trajectories, config
 
 
+def _pad_to_2d(sample_lists: list[list[float]]) -> np.ndarray:
+    """Pad a list of variable-length sample lists into a 2D float32 array, NaN-filled."""
+    if not sample_lists:
+        return np.empty((0, 0), dtype=np.float32)
+    max_len = max(len(s) for s in sample_lists)
+    if max_len == 0:
+        return np.full((len(sample_lists), 0), np.nan, dtype=np.float32)
+    out = np.full((len(sample_lists), max_len), np.nan, dtype=np.float32)
+    for i, s in enumerate(sample_lists):
+        if s:
+            out[i, : len(s)] = s
+    return out
+
+
 def save_scores(
     results: Sequence[PatientResults],
     output_path: pathlib.Path | str,
+    *,
+    avg_m1_tokens: float | None = None,
+    avg_m2_tokens: float | None = None,
 ) -> pathlib.Path:
-    """Save aggregated patient scores to disk.
+    """Save patient scores to disk.
 
-    Saves three arrays (M0, M1, M2) where each element is the mean
-    estimator value for a patient.
+    Saves per-patient mean scores (M0, M1, M2) and full per-timeline raw
+    samples (M0_raw, M1_raw, M2_raw) as NaN-padded 2D arrays for downstream
+    analysis (e.g. subsampling bootstraps). Optionally saves average token
+    costs per M1/M2 trajectory for token-efficiency comparisons.
 
     Args:
         results: Per-patient results from the scheduler.
         output_path: Path for the output .npz file.
+        avg_m1_tokens: Average tokens generated per M1 trajectory.
+        avg_m2_tokens: Average tokens generated per M2 trajectory.
 
     Returns:
         Path to the saved file.
@@ -204,7 +338,17 @@ def save_scores(
     M1 = np.array([np.mean(r.m1_samples) if r.m1_samples else np.nan for r in results])
     M2 = np.array([np.mean(r.m2_samples) if r.m2_samples else np.nan for r in results])
 
-    np.savez_compressed(output_path, M0=M0, M1=M1, M2=M2)
+    M0_raw = _pad_to_2d([list(map(float, r.m0_samples)) for r in results])
+    M1_raw = _pad_to_2d([list(map(float, r.m1_samples)) for r in results])
+    M2_raw = _pad_to_2d([list(map(float, r.m2_samples)) for r in results])
+
+    save_kwargs: dict = dict(M0=M0, M1=M1, M2=M2, M0_raw=M0_raw, M1_raw=M1_raw, M2_raw=M2_raw)
+    if avg_m1_tokens is not None:
+        save_kwargs["avg_m1_tokens"] = np.array([avg_m1_tokens], dtype=np.float64)
+    if avg_m2_tokens is not None:
+        save_kwargs["avg_m2_tokens"] = np.array([avg_m2_tokens], dtype=np.float64)
+
+    np.savez_compressed(output_path, **save_kwargs)
     return output_path
 
 
@@ -213,11 +357,14 @@ def load_scores(
 ) -> dict[str, np.ndarray]:
     """Load saved scores.
 
-    Args:
-        input_path: Path to the .npz scores file.
-
-    Returns:
-        Dict with keys "M0", "M1", "M2" mapping to numpy arrays.
+    Returns a dict with keys:
+        M0, M1, M2       — per-patient mean scores (always present)
+        M0_raw, M1_raw, M2_raw  — NaN-padded (n_patients × max_samples) arrays
+        avg_m1_tokens, avg_m2_tokens  — shape-(1,) float64 arrays (if saved)
     """
     data = np.load(input_path)
-    return {"M0": data["M0"], "M1": data["M1"], "M2": data["M2"]}
+    result: dict = {"M0": data["M0"], "M1": data["M1"], "M2": data["M2"]}
+    for key in ("M0_raw", "M1_raw", "M2_raw", "avg_m1_tokens", "avg_m2_tokens"):
+        if key in data.files:
+            result[key] = data[key]
+    return result

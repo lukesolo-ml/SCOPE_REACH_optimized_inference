@@ -68,6 +68,12 @@ def make_trajectory(
     timeline_terminating_id=None,
     was_time_truncated=False,
     truncation_idx=None,
+    scope_estimates=None,
+    reach_estimates=None,
+    occurred_flag=None,
+    occurred_index=None,
+    inline_tracked_ids=None,
+    inline_tracked_name=None,
 ):
     """Helper to build a GeneratedTrajectory with sensible defaults."""
     return GeneratedTrajectory(
@@ -79,4 +85,10 @@ def make_trajectory(
         timeline_terminating_id=timeline_terminating_id,
         was_time_truncated=was_time_truncated,
         truncation_idx=truncation_idx,
+        scope_estimates=scope_estimates,
+        reach_estimates=reach_estimates,
+        occurred_flag=occurred_flag,
+        occurred_index=occurred_index,
+        inline_tracked_ids=inline_tracked_ids,
+        inline_tracked_name=inline_tracked_name,
     )
