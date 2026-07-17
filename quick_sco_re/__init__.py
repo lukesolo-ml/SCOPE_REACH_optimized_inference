@@ -28,14 +28,17 @@ Typical usage:
     save_scores(results, "scores.npz")
 """
 
+from .generation import generate_m2_from_m1_trajectory
 from .io import load_scores, load_trajectories, save_scores, save_trajectories
 from .scheduler import (
     aggregate_results,
     generate_and_score,
     generate_trajectories,
+    generate_m2_from_m1_trajectories,
     score_trajectories,
     create_engine
 )
+from .scoring import score_trajectory
 from .structures import (
     GeneratedTrajectory,
     GenerationConfig,
@@ -54,6 +57,9 @@ __all__ = [
     # Scheduler functions
     "generate_and_score",
     "generate_trajectories",
+    "generate_m2_from_m1_trajectory",
+    "generate_m2_from_m1_trajectories",
+    "score_trajectory",
     "score_trajectories",
     "aggregate_results",
     "create_engine",

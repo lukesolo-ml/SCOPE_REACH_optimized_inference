@@ -1,0 +1,31 @@
+{
+  "max_len": 10000,
+  "n_samp": 10,
+  "target_event_id": 121,
+  "end_token_ids": [
+    117,
+    118,
+    119,
+    120,
+    121,
+    122,
+    123,
+    124,
+    125,
+    126,
+    127,
+    128
+  ],
+  "suppressed_ids": [
+    89
+  ],
+  "temperature": 1.0,
+  "trunc_id": null,
+  "token_id_to_minutes": {},
+  "max_time": null,
+  "time_check_interval": 100,
+  "tracked_ids": [
+    121
+  ],
+  "tracked_name": "DSCG//expired"
+}

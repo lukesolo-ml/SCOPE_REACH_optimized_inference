@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-04-17T17:46:20.503869+00:00",
+  "n_patients": 100,
+  "n_samp": 10,
+  "methods": [
+    "M1",
+    "M2"
+  ],
+  "score_inline": true,
+  "target_event": "DSCG//expired",
+  "target_event_id": 121,
+  "tracked_name": "DSCG//expired",
+  "tracked_ids_len": 1,
+  "wall_time_seconds": 63.1589994430542,
+  "m1_generated_tokens": 561850,
+  "m2_generated_tokens": 246575,
+  "total_generated_tokens": 808425,
+  "m1_with_target_event": 238,
+  "m1_total_trajectories": 1000,
+  "m1_event_rate": 0.238,
+  "true_n_events": 2,
+  "true_prevalence": 0.02,
+  "mean_M0": 0.23799999999999996,
+  "mean_M1": 0.24604152864980736,
+  "mean_M2": 0.2451688526005059
+}
