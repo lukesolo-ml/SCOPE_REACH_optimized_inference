@@ -28,7 +28,9 @@ Typical usage:
     save_scores(results, "scores.npz")
 """
 
+from .diagnostics import check_engine_parity, check_rope_config
 from .generation import generate_m2_from_m1_trajectory
+from .hf_scoring import generation_segments, score_full_vocab
 from .io import load_scores, load_trajectories, save_scores, save_trajectories
 from .scheduler import (
     aggregate_results,
@@ -38,6 +40,7 @@ from .scheduler import (
     score_trajectories,
     create_engine
 )
+from .restrictions import allowed_mask, silence_restriction_bias
 from .scoring import score_trajectory
 from .structures import (
     GeneratedTrajectory,
@@ -68,4 +71,13 @@ __all__ = [
     "load_trajectories",
     "save_scores",
     "load_scores",
+    # First-token restrictions
+    "silence_restriction_bias",
+    "allowed_mask",
+    # Full-vocabulary HF scoring (needs the [hf] extra)
+    "generation_segments",
+    "score_full_vocab",
+    # Checks
+    "check_engine_parity",
+    "check_rope_config",
 ]
