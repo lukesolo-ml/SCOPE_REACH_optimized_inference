@@ -59,6 +59,7 @@ def save_trajectories(
     prompt_lens = []
     was_time_truncateds = []
     truncation_idxs = []
+    n_conditioned = []
     output_ids_flat = []
     output_ids_offsets = [0]
 
@@ -84,6 +85,7 @@ def save_trajectories(
         traj_types.append(traj.traj_type.value)
         prompt_lens.append(traj.prompt_len)
         was_time_truncateds.append(traj.was_time_truncated)
+        n_conditioned.append(traj.n_conditioned_steps)
         truncation_idxs.append(
             traj.truncation_idx if traj.truncation_idx is not None else -1
         )
@@ -126,6 +128,7 @@ def save_trajectories(
         prompt_len=np.array(prompt_lens, dtype=np.int32),
         was_time_truncated=np.array(was_time_truncateds, dtype=bool),
         truncation_idx=np.array(truncation_idxs, dtype=np.int32),
+        n_conditioned_steps=np.array(n_conditioned, dtype=np.int32),
         timeline_terminating_id=np.array(timeline_terminating_ids, dtype=np.int32),
         output_ids_flat=np.array(output_ids_flat, dtype=np.int32),
         output_ids_offsets=np.array(output_ids_offsets, dtype=np.int64),
@@ -164,6 +167,8 @@ def save_trajectories(
             "time_check_interval": config.time_check_interval,
             "tracked_ids": config.tracked_ids,
             "tracked_names": config.tracked_names,
+            "context_window": config.context_window,
+            "window_keep": config.window_keep,
         }
         with open(output_dir / "config.json", "w") as f:
             json.dump(config_dict, f, indent=2)
@@ -193,6 +198,11 @@ def load_trajectories(
         data["was_time_truncated"]
         if "was_time_truncated" in data.files
         else [False] * len(patient_idxs)
+    )
+    n_conditioned = (
+        data["n_conditioned_steps"]
+        if "n_conditioned_steps" in data.files
+        else [0] * len(patient_idxs)
     )
     truncation_idxs = (
         data["truncation_idx"]
@@ -275,6 +285,7 @@ def load_trajectories(
                 occurred_index=occurred_index,
                 inline_tracked_ids=inline_tracked_ids,
                 inline_tracked_name=inline_tracked_name,
+                n_conditioned_steps=int(n_conditioned[i]),
             )
         )
 

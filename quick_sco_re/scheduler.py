@@ -31,14 +31,16 @@ from .structures import (
 
 logger = logging.getLogger(__name__)
 
-def create_engine(model_path, max_len, use_time_horizon = False, mem_fraction = 0.8):
+def create_engine(model_path, max_len, use_time_horizon = False, mem_fraction = 0.8, context_length = None, attention_backend = "triton"):
+    """context_length defaults to max_len; with a rolling window
+    (GenerationConfig.context_window) pass the window, since no request is longer."""
     return sgl.Engine(
         model_path=model_path,
         skip_tokenizer_init=True,
         disable_overlap_schedule=use_time_horizon,
         enable_custom_logit_processor=use_time_horizon,
-        context_length=max_len,
-        attention_backend='triton',
+        context_length=context_length or max_len,
+        attention_backend=attention_backend,
         disable_cuda_graph=use_time_horizon,
         sampling_backend="pytorch",
         mem_fraction_static=mem_fraction,
@@ -51,6 +53,7 @@ async def generate_trajectories(
     patient_tokens: Sequence[list[int]],
     methods: list[str] = ["M1", "M2"],
     stop_at_tracked_events: bool = True,
+    first_token_biases: Sequence[dict | None] | None = None,
 ) -> list[GeneratedTrajectory]:
     """Generate all M1 and M2 trajectories for a batch of patients.
 
@@ -64,24 +67,29 @@ async def generate_trajectories(
         patient_tokens: List of tokenized patient timelines (one per patient).
         stop_at_tracked_events: If False, M1 trajectories run to their natural
             end token rather than stopping early when a tracked event occurs.
+        first_token_biases: Optional per-patient extra logit bias for the first
+            generated token (see generate_trajectory), parallel to patient_tokens.
 
     Returns:
         List of all generated trajectories.
     """
     gen_tasks = []
     for patient_idx, tokens in enumerate(patient_tokens):
+        ftb = first_token_biases[patient_idx] if first_token_biases is not None else None
         for sample_idx in range(config.n_samp):
             if "M1" in methods:
                 gen_tasks.append(
                     generate_trajectory(
                         engine, config, tokens, patient_idx, sample_idx, TrajectoryType.M1,
                         stop_at_tracked_events=stop_at_tracked_events,
+                        first_token_bias=ftb,
                     )
                 )
             if "M2" in methods:
                 gen_tasks.append(
                     generate_trajectory(
-                        engine, config, tokens, patient_idx, sample_idx, TrajectoryType.M2
+                        engine, config, tokens, patient_idx, sample_idx, TrajectoryType.M2,
+                        first_token_bias=ftb,
                     )
                 )
 
@@ -193,7 +201,8 @@ async def generate_and_score(
     config: GenerationConfig,
     patient_tokens: Sequence[list[int]],
     target_token_id,
-    methods: list[str] = ["M1", "M2"]
+    methods: list[str] = ["M1", "M2"],
+    first_token_biases=None,
 ) -> tuple[list[GeneratedTrajectory], list[PatientResults]]:
     """Generate and immediately score all trajectories.
 
@@ -211,7 +220,9 @@ async def generate_and_score(
     """
     total_start = time.time()
 
-    m1_trajectories = await generate_trajectories(engine, config, patient_tokens, ["M1"])
+    m1_trajectories = await generate_trajectories(
+        engine, config, patient_tokens, ["M1"], first_token_biases=first_token_biases,
+    )
 
     if "M2" in methods:
         m2_trajectories = await generate_m2_from_m1_trajectories(

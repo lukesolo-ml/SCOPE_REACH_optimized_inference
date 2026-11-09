@@ -55,6 +55,16 @@ class GenerationConfig:
             computes per-token SCOPE and REACH without a second scoring pass.
         tracked_names: Optional labels for each tracked token (for downstream
             keying / display). Parallel to tracked_ids.
+        context_window: Rolling context window, in tokens. When set, no request
+            ever sends the model more than this many tokens of context: generation
+            runs in segments, and once the context reaches the window it is cut
+            back to the last ``window_keep`` tokens before continuing. Scoring
+            passes are windowed the same way. Set it to the length of the packed
+            blocks the model was trained on; models degrade when conditioned on
+            more context than they were trained with. None (default) sends the
+            whole sequence, as before. ``max_len`` still caps the total length.
+        window_keep: Tokens kept when the context is cut back. Defaults to three
+            quarters of ``context_window``.
     """
 
     max_len: int
@@ -69,6 +79,8 @@ class GenerationConfig:
     time_check_interval: int = 100
     tracked_ids: list[int] | None = None
     tracked_names: list[str] | None = None
+    context_window: int | None = None
+    window_keep: int | None = None
 
 
 @dataclass
@@ -97,6 +109,11 @@ class GeneratedTrajectory:
         occurred_index: First-occurrence index per tracked token (-1 if none).
         inline_tracked_ids: Echo of tracked_ids used during generation.
         inline_tracked_name: Echo of tracked_names used during generation.
+        n_conditioned_steps: Number of leading generated steps that were sampled
+            from a restricted distribution on which no tracked event can occur
+            (see ``first_token_bias`` in generate_trajectory). Their tracked-event
+            probability is 0 under that conditioning, so inline estimates and
+            scoring passes skip them.
     """
 
     patient_idx: int
@@ -114,6 +131,7 @@ class GeneratedTrajectory:
     inline_tracked_ids: list[int] | None = None
     inline_tracked_name: list[str] | None = None
     n_new_tokens: int | None = None
+    n_conditioned_steps: int = 0
 
 
 @dataclass

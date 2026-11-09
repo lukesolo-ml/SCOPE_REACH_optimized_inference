@@ -13,13 +13,26 @@ would push elapsed time over the horizon. This means scoring receives a cleanly
 trimmed sequence — there is no need to drop trailing logprobs here. The old
 ``dscg_logprobs[:-2]`` adjustment for time-truncated trajectories is therefore
 removed.
+
+Rolling context window
+----------------------
+When GenerationConfig.context_window is set, the scoring pass is windowed the
+same way generation is: the generated positions are scored in segments, each
+conditioned on at most ``context_window`` tokens (the first segment on the end
+of the prompt, later ones on the last ``window_keep`` tokens before them).
+
+Conditioned steps
+-----------------
+The first ``traj.n_conditioned_steps`` generated positions were sampled from a
+restricted distribution on which no tracked event can occur; their target
+probability is set to 0.
 """
 
 import numpy as np
 import sglang as sgl
 
 from .structures import GeneratedTrajectory, GenerationConfig, ScoredTrajectory, TrajectoryType
-from .generation import apply_time_truncation
+from .generation import _SGLANG_OVERHEAD, apply_time_truncation
 
 def _extract_token_logprobs(
     output: dict,
@@ -56,6 +69,40 @@ def _extract_token_logprobs(
                 logprobs.append(logprob)
                 break
 
+    return logprobs
+
+
+async def _windowed_target_logprobs(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    full_sequence: list[int],
+    prompt_len: int,
+) -> list[float]:
+    """Target logprob at every position after the prompt, never conditioning on
+    more than config.context_window tokens."""
+    window = config.context_window
+    keep = config.window_keep or (window - window // 4)
+    span = window - _SGLANG_OVERHEAD - 1
+    if not 0 < keep < span:
+        raise ValueError(f"window_keep={keep} must be in (0, {span})")
+    logprobs: list[float] = []
+    s, end = prompt_len, len(full_sequence)
+    while s < end:
+        # First segment: as much of the prompt as fits, like generation; once the
+        # window is full, the last `keep` tokens.
+        c0 = max(0, s - (span - 1 if s == prompt_len else keep))
+        if c0 + span <= s:
+            c0 = s - keep
+        e = min(end, c0 + span)
+        out = await engine.async_generate(
+            input_ids=full_sequence[c0:e],
+            sampling_params={"max_new_tokens": 1, "temperature": 1.0},
+            return_logprob=True,
+            logprob_start_len=s - c0 - 1,
+            token_ids_logprob=[config.target_event_id],
+        )
+        logprobs += _extract_token_logprobs(out, config.target_event_id, source="input")[: e - s]
+        s = e
     return logprobs
 
 
@@ -122,6 +169,11 @@ async def score_trajectory(
     full_sequence = prompt_tokens + scoring_ids
     prompt_len = len(prompt_tokens)
 
+    if config.context_window is not None:
+        dscg_logprobs = await _windowed_target_logprobs(engine, config, full_sequence, prompt_len)
+        dscg_logprobs = dscg_logprobs[:len(scoring_ids)]
+        return _score_from_logprobs(traj, dscg_logprobs)
+
     score_output = await engine.async_generate(
         input_ids=full_sequence,
         sampling_params={
@@ -143,11 +195,15 @@ async def score_trajectory(
         score_output, config.target_event_id, source="input", skip=0
     )
     dscg_logprobs = dscg_logprobs[:len(scoring_ids)]
+    return _score_from_logprobs(traj, dscg_logprobs)
 
+
+def _score_from_logprobs(traj: GeneratedTrajectory, dscg_logprobs: list[float]) -> ScoredTrajectory:
     if not dscg_logprobs:
         return ScoredTrajectory(trajectory=traj, score=0.0)
 
     probs = np.clip(np.exp(dscg_logprobs), 0.0, 1.0)
+    probs[: traj.n_conditioned_steps] = 0.0
 
     if traj.traj_type == TrajectoryType.M1:
         score = float(np.sum(probs))

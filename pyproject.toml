@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quick_sco_re"
-version = "0.1.0"
+version = "0.2.0"
 description = "Monte Carlo timeline completion and scoring for autoregressive generative models"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,4 +16,9 @@ dependencies = [
 packages = ["quick_sco_re"]
 
 [project.optional-dependencies]
+hf = ["torch", "transformers"]
+cocoa = ["torch", "transformers", "polars", "pyyaml", "scikit-learn"]
 dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "cocoa_example/tests"]
