@@ -100,7 +100,7 @@ class TestPersistenceRoundtrip:
                 occurred_flag=np.array([True, False, False]),
                 occurred_index=np.array([2, -1, -1], dtype=np.int64),
                 inline_tracked_ids=[10, 20, 30],
-                inline_tracked_name="test_set",
+                inline_tracked_name=["test_set"],
             ),
             GeneratedTrajectory(
                 patient_idx=1, sample_idx=0, traj_type=TrajectoryType.M2,
@@ -111,7 +111,7 @@ class TestPersistenceRoundtrip:
                 occurred_flag=np.array([True, True, False]),
                 occurred_index=np.array([0, 1, -1], dtype=np.int64),
                 inline_tracked_ids=[10, 20, 30],
-                inline_tracked_name="test_set",
+                inline_tracked_name=["test_set"],
             ),
         ]
 
@@ -161,7 +161,7 @@ class TestPersistenceRoundtrip:
                 occurred_flag=np.array([True]),
                 occurred_index=np.array([1], dtype=np.int64),
                 inline_tracked_ids=[10],
-                inline_tracked_name="mixed",
+                inline_tracked_name=["mixed"],
             ),
             GeneratedTrajectory(
                 patient_idx=1, sample_idx=0, traj_type=TrajectoryType.M2,

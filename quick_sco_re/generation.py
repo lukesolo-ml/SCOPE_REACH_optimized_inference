@@ -35,6 +35,25 @@ Requirements when using time-based stopping:
     automatically even if trunc_id appears in config.suppressed_ids.
       NOTE: THIS IS ALSO IMPORTANT
       TODO: This isn't particularly robust since not every vocab will have such an id
+
+Rolling context window
+----------------------
+When GenerationConfig.context_window is set, a trajectory is generated in
+segments so that no request ever conditions the model on more than
+``context_window`` tokens. When the context fills the window it is cut back to
+the last ``window_keep`` tokens and generation continues; ``max_len`` still
+caps the total (prompt + generated) length. Inline logprobs from all segments
+are concatenated, so inline SCOPE/REACH estimates are unchanged in meaning.
+With time-based stopping, elapsed time is carried across segments.
+
+First-token restriction
+-----------------------
+``first_token_bias`` (per request) samples the first generated token alone,
+with an extra logit bias, before generation continues normally. The pipeline
+uses it to condition on how long the patient has been silent before the
+prompt cut: only time-gap tokens long enough to cover that silence are
+allowed. Tracked events cannot be sampled on that step, so its tracked-event
+probability is 0 and it is recorded in ``n_conditioned_steps``.
 """
 
 import logging
@@ -175,55 +194,21 @@ def apply_time_truncation(
 # ---------------------------------------------------------------------------
 
 
-async def generate_trajectory(
-    engine: sgl.Engine,
+# SGLang's effective per-request budget is context_length - max_new_tokens - K
+# where K ≈ 4-6 (internal KV-cache overhead). Using -1 for max_new causes the
+# request to be rejected when the prompt is long. Reserving 8 extra slots is a
+# uniform constant applied to every request — it reduces generation headroom
+# by 8 tokens across the board, introducing no per-patient bias.
+_SGLANG_OVERHEAD = 8
+
+
+def _request_settings(
     config: GenerationConfig,
-    prompt_tokens: list[int],
-    patient_idx: int,
-    sample_idx: int,
     traj_type: TrajectoryType,
-    stop_at_tracked_events: bool = True,
-) -> GeneratedTrajectory:
-    """Generate a single trajectory, optionally with inline SCOPE/REACH estimates.
-
-    When config.tracked_ids is set, token_ids_logprob is used to extract
-    per-step probabilities for each tracked token during generation. SCOPE
-    (sum of probs) and REACH (1 - prod(1 - prob)) are accumulated up to and
-    including the step at which each tracked token first appears in output_ids.
-
-    When time-based stopping is active, output_ids are post-hoc trimmed to the
-    exact time horizon boundary after generation.
-
-    Args:
-        engine: SGLang inference engine.
-        config: Generation configuration.
-        prompt_tokens: Tokenized patient timeline (the prompt/prefix).
-        patient_idx: Index of the patient in the batch.
-        sample_idx: Index of the Monte Carlo sample.
-        traj_type: M1 (target event allowed) or M2 (target event forbidden).
-
-    Returns:
-        A GeneratedTrajectory with generated token IDs, metadata, and
-        (when config.tracked_ids is set) inline SCOPE/REACH estimates.
-    """
-    # SGLang's effective per-request budget is context_length - max_new_tokens - K
-    # where K ≈ 4-6 (internal KV-cache overhead). Using -1 for max_new causes the
-    # request to be rejected when the prompt is long. Reserving 8 extra slots is a
-    # uniform constant applied to every request — it reduces generation headroom
-    # by 8 tokens across the board, introducing no per-patient bias.
-    _SGLANG_OVERHEAD = 8
-    max_new = config.max_len - len(prompt_tokens) - 1 - _SGLANG_OVERHEAD
-    if max_new < 1:
-        # Prompt alone exhausts the budget. Left-truncate oldest history to free
-        # space — the removed tokens are the most distant past, uniform across patients.
-        prompt_tokens = prompt_tokens[-(config.max_len - _SGLANG_OVERHEAD - 2):]
-        max_new = 1
-        logger.warning(
-            "Prompt left-truncated to %d tokens (patient=%d sample=%d traj=%s)",
-            len(prompt_tokens), patient_idx, sample_idx, traj_type.value,
-        )
+    stop_at_tracked_events: bool,
+) -> tuple[dict, list[int]]:
+    """Logit bias and stop tokens shared by every request of one trajectory."""
     use_time_stopping = config.max_time is not None and config.trunc_id is not None
-    use_inline_sr = config.tracked_ids is not None
 
     # Build logit bias from suppressed_ids.  When time-based stopping is active,
     # auto-exclude trunc_id so the logit processor can force it.
@@ -243,6 +228,23 @@ async def generate_trajectory(
     if use_time_stopping:
         stop_token_ids.append(config.trunc_id)
 
+    return logit_bias, stop_token_ids
+
+
+async def _sglang_request(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    input_ids: list[int],
+    max_new: int,
+    logit_bias: dict,
+    stop_token_ids: list[int],
+    elapsed_minutes: float = 0.0,
+) -> tuple[list[int], list, int | None, str | None]:
+    """One generation request. Returns (output_ids, per-step tracked logprobs,
+    matched stop token or None, finish type)."""
+    use_time_stopping = config.max_time is not None and config.trunc_id is not None
+    use_inline_sr = config.tracked_ids is not None
+
     sampling_params: dict = {
         "max_new_tokens": max_new,
         "temperature": config.temperature,
@@ -261,23 +263,163 @@ async def generate_trajectory(
             "trunc_id": config.trunc_id,
             "time_token_map": config.token_id_to_minutes,
             "check_interval": config.time_check_interval,
+            # carried across rolling-window segments; 0.0 for a single request
+            "_elapsed": elapsed_minutes,
+            "_cursor": 0,
         }
         sampling_params["custom_params"] = custom_params
         extra_kwargs["custom_logit_processor"] = _get_logit_processor_str()
 
     output = await engine.async_generate(
-        input_ids=prompt_tokens,
+        input_ids=input_ids,
         sampling_params=sampling_params,
         **extra_kwargs,
     )
 
     meta = output.get("meta_info", {})
     finish_reason = meta.get("finish_reason", {})
-    if isinstance(finish_reason, dict) and finish_reason.get("type") == "stop":
+    finish_type = finish_reason.get("type") if isinstance(finish_reason, dict) else None
+    if finish_type == "stop":
         terminal_token_id = finish_reason.get("matched")
     else:
         terminal_token_id = None
     output_ids = list(meta.get("output_ids", output.get("output_ids", [])))
+    step_logprobs = list(meta.get("output_token_ids_logprobs", []) or [])
+    return output_ids, step_logprobs, terminal_token_id, finish_type
+
+
+async def generate_trajectory(
+    engine: sgl.Engine,
+    config: GenerationConfig,
+    prompt_tokens: list[int],
+    patient_idx: int,
+    sample_idx: int,
+    traj_type: TrajectoryType,
+    stop_at_tracked_events: bool = True,
+    first_token_bias: dict[int, float] | None = None,
+) -> GeneratedTrajectory:
+    """Generate a single trajectory, optionally with inline SCOPE/REACH estimates.
+
+    When config.tracked_ids is set, token_ids_logprob is used to extract
+    per-step probabilities for each tracked token during generation. SCOPE
+    (sum of probs) and REACH (1 - prod(1 - prob)) are accumulated up to and
+    including the step at which each tracked token first appears in output_ids.
+
+    When time-based stopping is active, output_ids are post-hoc trimmed to the
+    exact time horizon boundary after generation.
+
+    When config.context_window is set, generation runs in rolling-window
+    segments (see module docstring).
+
+    Args:
+        engine: SGLang inference engine.
+        config: Generation configuration.
+        prompt_tokens: Tokenized patient timeline (the prompt/prefix).
+        patient_idx: Index of the patient in the batch.
+        sample_idx: Index of the Monte Carlo sample.
+        traj_type: M1 (target event allowed) or M2 (target event forbidden).
+        first_token_bias: Optional extra logit bias for the first generated
+            token only (token id -> additive bias; -10000 forbids). The step is
+            recorded as conditioned: no tracked token may be allowed on it.
+
+    Returns:
+        A GeneratedTrajectory with generated token IDs, metadata, and
+        (when config.tracked_ids is set) inline SCOPE/REACH estimates.
+    """
+    use_time_stopping = config.max_time is not None and config.trunc_id is not None
+    logit_bias, stop_token_ids = _request_settings(config, traj_type, stop_at_tracked_events)
+
+    max_new = config.max_len - len(prompt_tokens) - 1 - _SGLANG_OVERHEAD
+    if max_new < 1:
+        # Prompt alone exhausts the budget. Left-truncate oldest history to free
+        # space — the removed tokens are the most distant past, uniform across patients.
+        prompt_tokens = prompt_tokens[-(config.max_len - _SGLANG_OVERHEAD - 2):]
+        max_new = 1
+        logger.warning(
+            "Prompt left-truncated to %d tokens (patient=%d sample=%d traj=%s)",
+            len(prompt_tokens), patient_idx, sample_idx, traj_type.value,
+        )
+
+    n_conditioned = 0
+    if config.context_window is None and not first_token_bias:
+        # Single request over the whole sequence (original behaviour).
+        output_ids, step_logprobs, terminal_token_id, _ = await _sglang_request(
+            engine, config, list(prompt_tokens), max_new, logit_bias, stop_token_ids,
+        )
+    else:
+        window = config.context_window or config.max_len
+        keep = config.window_keep or (window - window // 4)
+        if not 0 < keep < window - _SGLANG_OVERHEAD - 1:
+            raise ValueError(f"window_keep={keep} must be in (0, context_window - {_SGLANG_OVERHEAD + 1})")
+        if first_token_bias and config.tracked_ids and any(
+            first_token_bias.get(t, 0.0) > -10000 for t in config.tracked_ids
+        ):
+            raise ValueError("first_token_bias must forbid every tracked token")
+
+        remaining = max_new
+        # as much of the prompt as fits while leaving room for at least one new token
+        ctx = list(prompt_tokens)[-(window - _SGLANG_OVERHEAD - 2):]
+        output_ids: list[int] = []
+        step_logprobs: list = []
+        terminal_token_id = None
+        elapsed = 0.0
+
+        if first_token_bias:
+            bias = dict(logit_bias)
+            for tid, b in first_token_bias.items():
+                bias[tid] = max(bias.get(tid, 0.0) + b, -10000)
+            ids, _, terminal_token_id, _ = await _sglang_request(
+                engine, config, ctx, 1, bias, stop_token_ids,
+            )
+            output_ids += ids
+            # Tracked events are forbidden on this step: probability 0 under the
+            # restriction (the model's unrestricted probabilities do not apply).
+            step_logprobs += [None] * len(ids)
+            n_conditioned = len(ids)
+            remaining -= len(ids)
+            ctx += ids
+            elapsed += sum(config.token_id_to_minutes.get(t, 0.0) for t in ids)
+
+        while remaining > 0 and terminal_token_id is None:
+            room = window - _SGLANG_OVERHEAD - 1 - len(ctx)
+            if room < 1:
+                ctx = ctx[-keep:]
+                room = window - _SGLANG_OVERHEAD - 1 - len(ctx)
+            ids, lps, terminal_token_id, finish_type = await _sglang_request(
+                engine, config, ctx, min(room, remaining), logit_bias, stop_token_ids,
+                elapsed_minutes=elapsed,
+            )
+            output_ids += ids
+            step_logprobs += lps[:len(ids)] + [None] * max(0, len(ids) - len(lps))
+            remaining -= len(ids)
+            ctx += ids
+            if use_time_stopping:
+                elapsed += sum(config.token_id_to_minutes.get(t, 0.0) for t in ids)
+                if elapsed >= config.max_time:
+                    break  # exact boundary is applied post hoc below
+            if not ids or (finish_type not in (None, "stop", "length")):
+                break
+
+    return _finalize_trajectory(
+        config, output_ids, step_logprobs, terminal_token_id,
+        patient_idx, sample_idx, traj_type, len(prompt_tokens), n_conditioned,
+    )
+
+
+def _finalize_trajectory(
+    config: GenerationConfig,
+    output_ids: list[int],
+    output_token_ids_logprobs: list,
+    terminal_token_id: int | None,
+    patient_idx: int,
+    sample_idx: int,
+    traj_type: TrajectoryType,
+    prompt_len: int,
+    n_conditioned: int = 0,
+) -> GeneratedTrajectory:
+    """Time truncation and inline SCOPE/REACH accumulation for a generated trajectory."""
+    use_time_stopping = config.max_time is not None and config.trunc_id is not None
+    use_inline_sr = config.tracked_ids is not None
 
     # --- Post-hoc exact truncation ---
     # The deferred processor may have overshot by up to check_interval tokens,
@@ -324,7 +466,6 @@ async def generate_trajectory(
         # Accumulate scope/reach from per-step logprobs.
         # output_token_ids_logprobs[t] gives P(tracked_id | tokens_0..t-1).
         # Include positions up to and including the occurrence step (occ_index[k]).
-        output_token_ids_logprobs = meta.get("output_token_ids_logprobs", [])
         for t, position_entry in enumerate(output_token_ids_logprobs):
             if position_entry is None:
                 continue
@@ -349,7 +490,7 @@ async def generate_trajectory(
         patient_idx=patient_idx,
         sample_idx=sample_idx,
         traj_type=traj_type,
-        prompt_len=len(prompt_tokens),
+        prompt_len=prompt_len,
         output_ids=output_ids,
         timeline_terminating_id=terminal_token_id,
         was_time_truncated=was_time_truncated,
@@ -361,6 +502,7 @@ async def generate_trajectory(
         inline_tracked_ids=inline_tracked_ids,
         inline_tracked_name=inline_tracked_name,
         n_new_tokens=len(output_ids),
+        n_conditioned_steps=min(n_conditioned, len(output_ids)),
     )
 
 
@@ -405,6 +547,7 @@ async def generate_m2_from_m1_trajectory(
             was_time_truncated=m1_traj.was_time_truncated,
             truncation_idx=m1_traj.truncation_idx,
             n_new_tokens=0,
+            n_conditioned_steps=m1_traj.n_conditioned_steps,
         )
 
     # Target event was generated: truncate before it and regenerate with suppression.
@@ -464,4 +607,5 @@ async def generate_m2_from_m1_trajectory(
         was_time_truncated=continuation.was_time_truncated,
         truncation_idx=truncation_idx,
         n_new_tokens=len(continuation.output_ids),
+        n_conditioned_steps=min(m1_traj.n_conditioned_steps, len(prefix_ids)),
     )

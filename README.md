@@ -120,6 +120,8 @@ Everything is controlled through `GenerationConfig`:
 | `token_id_to_minutes` | `dict[int, float]` | `{}` | Mapping from token ID → elapsed simulated time (in minutes). Used to accumulate elapsed time during generation for time-based stopping. |
 | `max_time` | `float \| None` | `None` | Maximum simulated time in minutes. When elapsed time exceeds this, generation is terminated. Requires `trunc_id`. |
 | `time_check_interval` | `int` | `100` | Tokens between time-horizon checks. The logit processor is a no-op for the first `time_check_interval` tokens, then checks every `time_check_interval` tokens. Higher values = less overhead, but coarser online detection (post-hoc truncation is always exact). |
+| `context_window` | `int \| None` | `None` | Rolling context window in tokens. No request conditions the model on more than this; when the context fills it, it is cut back to the last `window_keep` tokens. Scoring passes are windowed the same way. Set it to the packed block length the model was trained on. `max_len` still caps the total length. `None` = whole sequence, as before. |
+| `window_keep` | `int \| None` | `None` | Tokens kept when the window is cut back. Defaults to ¾ of `context_window`. |
 
 ### Engine Setup
 
@@ -133,6 +135,9 @@ engine = create_engine(model_path="path/to/model", max_len=4096)
 
 # With time-based stopping (enables custom logit processor + disables overlap scheduling)
 engine = create_engine(model_path="path/to/model", max_len=4096, use_time_horizon=True)
+
+# With a rolling window, the engine only needs the window as its context length
+engine = create_engine(model_path="path/to/model", max_len=10000, context_length=1024)
 ```
 
 Or configure SGLang directly — the key flags for time-based stopping are `disable_overlap_schedule=True` and `enable_custom_logit_processor=True`.
@@ -148,6 +153,16 @@ Some models generate sequences where tokens carry temporal semantics (e.g. time-
 2. **Post-hoc exact truncation** — because the processor only checks periodically, the trajectory may overshoot by up to `time_check_interval` tokens. After generation, the output is walked token-by-token to find the exact position where elapsed time first exceeded `max_time`, and `output_ids` are trimmed to end just before that point.
 
 This gives exact time-horizon semantics at near-baseline generation throughput.
+
+---
+
+## Rolling Window and First-Token Restriction
+
+Two options that fixed over-estimation of adverse outcomes with cocoa/cotorra models.
+
+**Rolling context window** (`GenerationConfig.context_window`, `window_keep`). Models trained on fixed packed blocks degrade when conditioned on longer contexts. With a window set, each trajectory is generated in segments and the context is cut back to the last `window_keep` tokens whenever it fills the window. Inline SCOPE/REACH logprobs from all segments are concatenated. The scoring pass for REACH regenerations uses the same windowing. With time-based stopping, elapsed time is carried across segments.
+
+**First-token restriction** (`first_token_bias` on `generate_trajectory`; `first_token_biases` per patient on `generate_trajectories` / `generate_and_score`). The first generated token is sampled alone, with an extra logit bias, before generation continues normally. One use is a *silence restriction*. A prompt cut at 24 hours ends at the patient's last event, so a patient silent for *x* minutes before the cut must have their next event at least *x* minutes later. Only time-gap tokens whose bin can contain or exceed *x* are allowed. The bias must forbid every tracked token. That step's tracked-event probability is therefore 0, and it is recorded as `GeneratedTrajectory.n_conditioned_steps`, which inline estimates and scoring passes skip.
 
 ---
 
