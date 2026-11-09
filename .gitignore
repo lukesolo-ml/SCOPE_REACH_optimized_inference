@@ -22,3 +22,14 @@ cocoa_inference_testing/trajectories
 # OS
 .DS_Store
 Thumbs.db
+
+# Patient-level data and run outputs: never commit (MIMIC data use agreement)
+*.parquet
+*.npz
+*.npy
+*.pkl
+*.arrow
+*.feather
+cocoa_inference_testing/scope_reach_output*/
+cocoa_inference_testing/trajectories*/
+wandb/
