@@ -17,4 +17,8 @@ packages = ["quick_sco_re"]
 
 [project.optional-dependencies]
 hf = ["torch", "transformers"]
+cocoa = ["torch", "transformers", "polars", "pyyaml", "scikit-learn"]
 dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "cocoa_example/tests"]

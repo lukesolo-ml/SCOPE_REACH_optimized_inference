@@ -210,6 +210,16 @@ Generate without logprobs, shut the SGLang engine down, then score. Never mix re
 
 ---
 
+## cocoa Example
+
+[`cocoa_example/`](cocoa_example/README.md) is a complete pipeline for models trained on [cocoa](https://github.com/bbj-lab/cocoa) EHR timelines. It runs multi-outcome M0 / SCOPE / REACH and optional full-vocabulary features, with the rolling window and silence restriction on, from cocoa's winnower output and a YAML config. Its tests run on synthetic cocoa-format files without a GPU.
+
+```bash
+python -m cocoa_example.run_cocoa --config cocoa_example/config_example.yaml
+```
+
+---
+
 ## API Overview
 
 ### Scheduler Functions
@@ -253,6 +263,7 @@ Generate without logprobs, shut the SGLang engine down, then score. Never mix re
 │   ├── bench_comparison.py   # Side-by-side timing & AUC comparison
 │   ├── bench_truncation.py   # Post-hoc vs. online truncation equivalence
 │   └── bench_io_roundtrip.py # Validates save/load roundtrip produces identical scores
+├── cocoa_example/            # Complete cocoa pipeline: adapter, multi-outcome runner, config, tests
 ├── tests/                    # Unit tests (no GPU required)
 ├── slurm/                    # HPC job scripts
 └── pyproject.toml
@@ -265,7 +276,7 @@ Generate without logprobs, shut the SGLang engine down, then score. Never mix re
 Unit tests run without a GPU or model (`test_hf_scoring.py` builds a tiny random Llama; it is skipped without torch/transformers):
 
 ```bash
-pytest tests/ -v
+pytest            # tests/ and cocoa_example/tests/
 ```
 
 ---

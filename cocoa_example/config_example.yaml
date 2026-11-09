@@ -1,0 +1,62 @@
+# Multi-outcome SCOPE / REACH on a cocoa cohort, with the over-estimation fixes on.
+# Paths are placeholders: point them at your own cocoa build and model.
+
+cocoa_outputs:
+  held_out_for_inference: /path/to/cocoa/processed/held_out_for_inference.parquet
+  tokenizer_yaml: /path/to/cocoa/processed/tokenizer.yaml
+
+model_path: /path/to/model            # Hugging Face format (save_pretrained), read by SGLang and transformers
+output_dir: ./cocoa_scope_reach_output  # patient-level outputs: keep local
+
+cohort:
+  max_patients: null                  # null = everyone; an integer subsamples
+  shuffle_seed: 42
+  require_flag: null                  # e.g. "XFR-IN//icu_future": keep only these rows
+  exclude_flag: "DSCG//expired_past"  # drop these rows
+
+prompt_overflow: truncate_left        # or drop: prompts longer than max_len
+
+generation:
+  max_len: 10000                      # prompt + generated tokens
+  n_samp: 100                         # M1 trajectories per patient
+  temperature: 1.0
+  methods: [M1, M2]                   # M2 adds REACH regenerations
+  tracked_events:
+    - XFR-IN//icu
+    - RESP//imv
+    - DSCG//expired
+  end_tokens:
+    prefixes: [DSCG]                  # discharge ends a stay
+    names: []
+  suppressed_tokens: [BOS]
+  prompt_prefix_tokens: []            # e.g. [EOS] if training blocks put EOS before every stay
+
+  rolling_window:                     # never condition on more context than the model was trained on
+    enabled: true
+    context_window: 4096              # the packed block length used in training
+    keep: 3072                        # tokens kept when the window is cut back
+
+  silence_restriction:                # the first generated token must be a time gap covering the silence before the cut
+    enabled: true
+    mode: hard                        # or prop
+    horizon_minutes: 1440             # the winnower's prediction cut (24 h)
+    time_column: s_elapsed_past
+    # time_token_bounds: defaults to cocoa's TIME// bins
+
+  time_stopping:
+    enabled: false
+
+engine:
+  mem_fraction: 0.5
+  attention_backend: triton
+  patient_chunk_size: 64
+
+checks:
+  parity: true                        # SGLang vs HF next-token distribution on 16 prompts before generating
+
+features:                             # full-vocabulary features of the M1 trajectories (needs quick_sco_re[hf])
+  enabled: false
+  token_budget: 60000
+
+save:
+  trajectories: true
