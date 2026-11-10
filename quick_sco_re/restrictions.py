@@ -16,6 +16,8 @@ is forbidden on that step.
   mode "prop"  the bin containing m is also scaled by the share of its
                whole-minute values that are >= m, (hi - m + 1) / (hi - lo).
 
+An open-ended top bin (hi = inf) is always allowed and never scaled.
+
 Below ``min_minutes`` (by default the smallest bin's lower edge: shorter gaps
 get no time token) nothing is restricted.
 
@@ -68,7 +70,7 @@ def silence_restriction_bias(
     for tid, (lo, hi) in time_token_bounds.items():
         if hi < m:
             bias[int(tid)] = FORBID
-        elif mode == "prop" and lo < m:
+        elif mode == "prop" and lo < m and math.isfinite(hi):
             bias[int(tid)] = math.log((hi - m + 1) / (hi - lo))
     return bias
 

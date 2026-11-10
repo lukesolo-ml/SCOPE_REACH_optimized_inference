@@ -14,10 +14,9 @@ Estimators:
 
 Typical usage:
 
-    import sglang as sgl
-    from quick_sco_re import GenerationConfig, generate_and_score, save_scores
+    from quick_sco_re import GenerationConfig, create_engine, generate_and_score, save_scores
 
-    engine = sgl.Engine(model_path="...", skip_tokenizer_init=True, context_length=10000)
+    engine = create_engine(model_path="...", max_len=10000)   # needs the [sglang] extra
     config = GenerationConfig(
         max_len=10000, n_samp=20,
         target_event_id=42, 
@@ -28,9 +27,17 @@ Typical usage:
     save_scores(results, "scores.npz")
 """
 
+from importlib.metadata import PackageNotFoundError, version as _version
+
+try:
+    __version__ = _version("quick_sco_re")
+except PackageNotFoundError:  # running from a source tree
+    __version__ = "0+unknown"
+
 from .diagnostics import check_engine_parity, check_rope_config
 from .generation import generate_m2_from_m1_trajectory
 from .hf_scoring import generation_segments, score_full_vocab
+from .models import export_backbone, is_wrapped, require_servable
 from .io import load_scores, load_trajectories, save_scores, save_trajectories
 from .scheduler import (
     aggregate_results,
@@ -77,6 +84,10 @@ __all__ = [
     # Full-vocabulary HF scoring (needs the [hf] extra)
     "generation_segments",
     "score_full_vocab",
+    # Model directories (cotorra models with secondary heads)
+    "export_backbone",
+    "is_wrapped",
+    "require_servable",
     # Checks
     "check_engine_parity",
     "check_rope_config",

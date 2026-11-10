@@ -12,12 +12,15 @@ The scheduler supports three modes of operation:
   - score_only: Score previously-saved trajectories loaded from disk.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
-import sglang as sgl
+if TYPE_CHECKING:  # sglang is imported only when an engine is created
+    import sglang as sgl
 
 from .generation import generate_trajectory, generate_m2_from_m1_trajectory
 from .scoring import score_trajectory
@@ -32,8 +35,19 @@ from .structures import (
 logger = logging.getLogger(__name__)
 
 def create_engine(model_path, max_len, use_time_horizon = False, mem_fraction = 0.8, context_length = None, attention_backend = "triton"):
-    """context_length defaults to max_len; with a rolling window
-    (GenerationConfig.context_window) pass the window, since no request is longer."""
+    """Start an SGLang engine for generation and scoring (needs the ``sglang`` extra).
+
+    context_length defaults to max_len; with a rolling window
+    (GenerationConfig.context_window) pass the window, since no request is longer.
+    A cotorra model saved with secondary heads is refused: export its backbone first
+    (``quick_sco_re.export_backbone``)."""
+    from .models import require_servable
+
+    require_servable(model_path)
+    try:
+        import sglang as sgl
+    except ImportError as e:
+        raise ImportError("create_engine needs SGLang: pip install 'quick-sco-re[sglang]'") from e
     return sgl.Engine(
         model_path=model_path,
         skip_tokenizer_init=True,

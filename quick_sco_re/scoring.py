@@ -28,8 +28,14 @@ restricted distribution on which no tracked event can occur; their target
 probability is set to 0.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # sglang is imported only when an engine is created
+    import sglang as sgl
+
 import numpy as np
-import sglang as sgl
 
 from .structures import GeneratedTrajectory, GenerationConfig, ScoredTrajectory, TrajectoryType
 from .generation import _SGLANG_OVERHEAD, apply_time_truncation

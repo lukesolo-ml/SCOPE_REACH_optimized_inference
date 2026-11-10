@@ -182,7 +182,11 @@ def check_rope_config(model_path: str) -> None:
 
     from transformers import AutoConfig
 
-    saved = json.load(open(os.path.join(model_path, "config.json")))
+    from .models import require_servable
+
+    require_servable(model_path)
+    with open(os.path.join(model_path, "config.json")) as f:
+        saved = json.load(f)
     want = saved.get("rope_parameters") or {"rope_theta": saved.get("rope_theta"), **(saved.get("rope_scaling") or {})}
     cfg = AutoConfig.from_pretrained(model_path)
     rp = getattr(cfg, "rope_parameters", None) or {}

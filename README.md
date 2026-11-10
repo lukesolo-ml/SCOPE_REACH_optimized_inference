@@ -49,11 +49,22 @@ The pipeline has two phases, both served through a single SGLang engine:
 ## Install
 
 ```bash
+pip install "quick_sco_re[sglang]"        # generation and scoring with SGLang
+pip install "quick_sco_re[sglang,hf]"     # + torch / transformers: score_full_vocab, parity checks, export_backbone
+pip install quick_sco_re                  # numpy only: load and analyse saved trajectories and scores
+```
+
+SGLang pins an exact torch build, so it is an extra rather than a dependency: installing
+`quick_sco_re` alone never replaces your torch. Tested with SGLang 0.5.10 on GPU; the SGLang
+interfaces it uses were checked unchanged through 0.5.23. Without SGLang the package still
+imports; `create_engine` then says what to install.
+
+From a clone (to run the tests or the cocoa example):
+
+```bash
 git clone https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git
 cd SCOPE_REACH_optimized_inference
-pip install -e .            # numpy + sglang
-pip install -e ".[hf]"      # adds torch + transformers for score_full_vocab
-pip install -e ".[dev]"     # adds pytest, pytest-asyncio
+pip install -e ".[all,dev]"
 ```
 
 ---
@@ -212,11 +223,25 @@ Generate without logprobs, shut the SGLang engine down, then score. Never mix re
 
 ## cocoa Example
 
-[`cocoa_example/`](cocoa_example/README.md) is a complete pipeline for models trained on [cocoa](https://github.com/bbj-lab/cocoa) EHR timelines. It runs multi-outcome M0 / SCOPE / REACH and optional full-vocabulary features, with the rolling window and silence restriction on, from cocoa's winnower output and a YAML config. Its tests run on synthetic cocoa-format files without a GPU.
+[`cocoa_example/`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference/tree/main/cocoa_example) (in the repository, not the PyPI package) is a complete pipeline for models trained on [cocoa](https://github.com/bbj-lab/cocoa) EHR timelines. It runs multi-outcome M0 / SCOPE / REACH and optional full-vocabulary features, with the rolling window and silence restriction on, from cocoa's winnower output and a YAML config. Written against cocoa-tokenizer 26.11; its tests run without a GPU, on synthetic files and, when cocoa is installed, on timelines cocoa itself collates, tokenizes and winnows.
 
 ```bash
 python -m cocoa_example.run_cocoa --config cocoa_example/config_example.yaml
 ```
+
+## cotorra Models
+
+[cotorra](https://github.com/bbj-lab/cotorra) (26.11) scores with this package (`cotorra[gen]`). A model it trains
+without secondary objectives is a stock `*ForCausalLM` and loads as is. One trained with `tte` / `tnt` /
+`disposition` heads is saved as `CotorraForCausalLM` (`model_type: cotorra`), which SGLang cannot load;
+`create_engine` and `check_rope_config` refuse it with a pointer to:
+
+```python
+from quick_sco_re import export_backbone
+export_backbone("path/to/mdl-run", "path/to/mdl-run-backbone")   # drops heads.*, unwraps text_config
+```
+
+The exported backbone has the same next-token distribution (identical logits under transformers).
 
 ---
 

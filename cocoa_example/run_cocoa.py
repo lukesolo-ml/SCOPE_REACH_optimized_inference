@@ -45,6 +45,8 @@ async def run(cfg: dict, shard_idx: int | None, n_shards: int | None, dry: bool)
     from quick_sco_re import check_rope_config, create_engine
 
     vocab = CocoaVocab(cfg["cocoa_outputs"]["tokenizer_yaml"])
+    logger.info(f"vocabulary: {vocab.size} tokens (cocoa-tokenizer {vocab.cocoa_version or 'version not recorded'}), "
+                f"{len(vocab.time_bins())} TIME// bins")
     cohort = load_cohort(cfg, vocab)
     if shard_idx is not None:
         cohort = shard(cohort, shard_idx, n_shards)

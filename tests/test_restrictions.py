@@ -58,3 +58,12 @@ def test_no_restriction_below_min_or_unknown():
 def test_bad_mode():
     with pytest.raises(ValueError):
         silence_restriction_bias(100, BOUNDS, VOCAB, mode="soft")
+
+
+def test_open_ended_top_bin():
+    """cocoa's last spacer (e.g. TIME//6mt+) has no upper edge: always allowed, never scaled."""
+    bounds = {10: (5, 15), 11: (15, 60), 12: (60, float("inf"))}
+    for mode in ("hard", "prop"):
+        b = silence_restriction_bias(600.0, bounds, range(14), mode=mode)
+        assert b[10] == FORBID and b[11] == FORBID and 12 not in b
+        assert b[0] == FORBID and b[13] == FORBID
