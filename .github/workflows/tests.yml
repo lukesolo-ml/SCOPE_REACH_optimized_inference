@@ -1,0 +1,88 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # weekly, to catch breakage from new releases of unpinned dependencies
+    - cron: "0 11 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # CPU only: SGLang is never installed here (tests use fake engines), and torch
+    # comes from the CPU index so the job doesn't download CUDA builds
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install ".[hf,cocoa,dev]"
+      # cocoa-tokenizer needs python 3.11+; without it test_with_cocoa.py skips
+      - run: pip install cocoa-tokenizer
+        if: matrix.python-version != '3.10'
+      - run: pytest -q
+
+  bare-install:
+    # `pip install quick_sco_re` with no extras: numpy only, no torch or sglang
+    name: import without extras
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: import, save and load scores, and get a clear error from create_engine
+        shell: python
+        run: |
+          import os, tempfile
+          import quick_sco_re as q
+
+          r = [q.PatientResults(m0_samples=[True], m1_samples=[0.2], m2_samples=[0.3])]
+          with tempfile.TemporaryDirectory() as d:
+              q.save_scores(r, os.path.join(d, "s.npz"))
+              assert q.load_scores(os.path.join(d, "s.npz"))["M2"].tolist() == [0.3]
+          try:
+              q.create_engine("unused", 10)
+          except ImportError as e:
+              assert "quick-sco-re[sglang]" in str(e)
+          else:
+              raise SystemExit("create_engine ran without sglang")
+          print("quick_sco_re", q.__version__, "ok without extras")
+
+  build:
+    name: build and check distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: distributions hold no data or notebooks
+        run: |
+          for f in dist/*; do
+            if (tar tzf "$f" 2>/dev/null || unzip -Z1 "$f") | grep -E '\.(parquet|npz|npy|ipynb|csv|pkl)$'; then
+              echo "::error::$f contains data files"; exit 1
+            fi
+          done
