@@ -4,11 +4,14 @@ cocoa (github.com/bbj-lab/cocoa) tokenizes EHR timelines and its winnower writes
 ``<split>_for_inference.parquet``: one row per subject with
 
   tokens_past        prompt token ids (the timeline up to the prediction cut, e.g. 24 h)
-  s_elapsed_past     seconds since admission of each prompt token
+  s_elapsed_past     seconds since the timeline's first event, per prompt token
+  times, start_time  every event's timestamp, and the subject's start time
   <EVENT>_past       the event already happened in the prompt   (bool)
   <EVENT>_future     the event happens after the cut: GROUND TRUTH (bool)
 
-and ``tokenizer.yaml`` with a ``lookup:`` map from token name to id. Nothing here needs a GPU.
+and ``tokenizer.yaml`` with a ``lookup:`` map from token name to id and, under ``cfg``, the
+tokenizer settings (``insert_spacers``, ``spacers``) the time-gap bins come from.
+Written against cocoa-tokenizer 26.11. Nothing here needs a GPU.
 """
 
 from __future__ import annotations
@@ -26,13 +29,32 @@ from quick_sco_re import GenerationConfig, silence_restriction_bias
 
 logger = logging.getLogger(__name__)
 
-# cocoa's time-gap bins, (lo, hi] in minutes
-COCOA_TIME_BINS = {
-    "TIME//5m-15m": (5, 15), "TIME//15m-1h": (15, 60), "TIME//1h-2h": (60, 120), "TIME//2h-6h": (120, 360),
-    "TIME//6h-12h": (360, 720), "TIME//12h-1d": (720, 1440), "TIME//1d-3d": (1440, 4320),
-    "TIME//3d-1w": (4320, 10080), "TIME//1w-2w": (10080, 20160), "TIME//2w-1mt": (20160, 43200),
-    "TIME//1mt-3mt": (43200, 129600), "TIME//3mt-6mt": (129600, 259200), "TIME//6mt+": (259200, 518400),
+# cocoa's default spacers (tokenization.yaml): label -> lower edge in minutes. A gap of g minutes
+# (floored) gets the last label whose edge g reaches, gaps under the first edge get none, and
+# the last bin is open-ended; so the bins are [5, 15], (15, 60], ..., (262980, inf).
+COCOA_DEFAULT_SPACERS = {
+    "5m-15m": 5, "15m-1h": 15, "1h-2h": 60, "2h-6h": 120, "6h-12h": 360, "12h-1d": 720, "1d-3d": 1440,
+    "3d-1w": 4320, "1w-2w": 10080, "2w-1mt": 20160, "1mt-3mt": 43200, "3mt-6mt": 131490, "6mt+": 262980,
 }
+
+
+def spacer_bins(spacers: dict) -> dict[str, tuple[float, float]]:
+    """``TIME//<label>`` -> (lo, hi] minutes from a cocoa ``spacers`` map (label -> lower edge).
+
+    cocoa labels a gap by the position of its bin in the map, not by the edges' values, so its
+    labels are right only when the edges increase in the order given. Anything else is refused:
+    the timelines were labelled inconsistently and no bin table describes them.
+    """
+    items = [(str(k), float(v)) for k, v in spacers.items()]
+    edges = [v for _, v in items]
+    if any(b <= a for a, b in zip(edges, edges[1:])):
+        raise ValueError(f"tokenizer spacers must increase in the order listed, got {dict(items)}: cocoa assigns "
+                         "TIME// labels by position, so these timelines were labelled with the wrong bins")
+    return {f"TIME//{k}": (lo, items[i + 1][1] if i + 1 < len(items) else math.inf)
+            for i, (k, lo) in enumerate(items)}
+
+
+COCOA_TIME_BINS = spacer_bins(COCOA_DEFAULT_SPACERS)
 
 
 def load_config(path: str | pathlib.Path) -> dict:
@@ -49,10 +71,18 @@ class CocoaVocab:
 
     def __init__(self, tokenizer_yaml: str | pathlib.Path):
         with open(tokenizer_yaml) as f:
-            lookup = yaml.safe_load(f)["lookup"]
-        self.name_to_id: dict[str, int] = {str(k): int(v) for k, v in lookup.items()}
+            data = yaml.safe_load(f)
+        self.name_to_id: dict[str, int] = {str(k): int(v) for k, v in data["lookup"].items()}
         self.id_to_name: dict[int, str] = {v: k for k, v in self.name_to_id.items()}
         self.size = max(self.id_to_name) + 1
+        self.tokenizer_cfg: dict = data.get("cfg") or {}
+        self.cocoa_version: str | None = data.get("cocoa_version")
+
+    def time_bins(self) -> dict[str, tuple[float, float]]:
+        """The ``TIME//`` bins this vocabulary was built with, (lo, hi] minutes, from the saved
+        tokenizer config (cocoa's defaults for a tokenizer.yaml without one); only bins in the vocab."""
+        spacers = self.tokenizer_cfg.get("spacers") or COCOA_DEFAULT_SPACERS
+        return {n: b for n, b in spacer_bins(spacers).items() if n in self}
 
     def __call__(self, name: str) -> int:
         if name not in self.name_to_id:
@@ -85,12 +115,24 @@ class Cohort:
 
 
 def end_token_ids(cfg: dict, vocab: CocoaVocab) -> set[int]:
-    end = cfg["generation"].get("end_tokens") or {"prefixes": ["DSCG"]}
+    """Tokens that end a trajectory: ``generation.end_tokens`` prefixes and names.
+
+    The default is every ``DSCG//`` token plus ``EOS``, which cocoa puts at the end of every
+    timeline. Without EOS as an end token, a trajectory that reaches it runs on into what the
+    model learned follows EOS in packed training blocks: another stay.
+    """
+    end = cfg["generation"].get("end_tokens")
+    if end is None:
+        end = {"prefixes": ["DSCG"], "names": ["EOS"] if "EOS" in vocab else []}
     ids: set[int] = set()
-    for p in end.get("prefixes", []):
+    for p in end.get("prefixes") or []:
         ids |= vocab.ids_with_prefix(p)
-    for n in end.get("names", []):
+    for n in end.get("names") or []:
         ids.add(vocab(n))
+    if not ids:
+        raise ValueError("generation.end_tokens matches no token: trajectories would never end")
+    if "EOS" in vocab and vocab("EOS") not in ids:
+        logger.warning("EOS is not an end token: trajectories that reach it continue into a new timeline")
     return ids
 
 
@@ -119,19 +161,11 @@ def load_cohort(cfg: dict, vocab: CocoaVocab, split_file: str | None = None) -> 
     if cohort_cfg.get("max_patients") is not None and df.height > cohort_cfg["max_patients"]:
         df = df.sample(n=int(cohort_cfg["max_patients"]), shuffle=True, seed=int(cohort_cfg.get("shuffle_seed", 42)))
 
-    # silence before the cut: horizon minus the last prompt event's time
-    sr = gen.get("silence_restriction") or {}
-    silence = None
-    tcol = sr.get("time_column", "s_elapsed_past")
-    if tcol in df.columns:
-        horizon = float(sr.get("horizon_minutes", 1440))
-        last = (df[tcol].list.last().fill_null(0) / 60.0).to_numpy().astype(float)
-        if sr.get("enabled") and (last > horizon + 1e-6).any():
-            raise ValueError(f"{int((last > horizon + 1e-6).sum())} prompts have events after horizon_minutes={horizon}; "
-                             "the horizon must match the winnower's prediction cut")
-        silence = horizon - last
-    elif sr.get("enabled"):
-        raise ValueError(f"silence_restriction needs the column '{tcol}'")
+    if "valid_future_count" in df.columns:
+        logger.warning("the winnower ran with horizon_after_threshold_s: <EVENT>_future flags count only events "
+                       "inside that window, while trajectories run to discharge or max_len")
+
+    silence = cut_silence_minutes(df, gen.get("silence_restriction") or {})
 
     prefix = [vocab(n) for n in gen.get("prompt_prefix_tokens") or []]
     max_len = int(gen["max_len"])
@@ -153,11 +187,47 @@ def load_cohort(cfg: dict, vocab: CocoaVocab, split_file: str | None = None) -> 
                   silence_minutes=None if silence is None else silence[km], n_truncated=n_trunc, n_dropped=dropped)
 
 
+def cut_silence_minutes(df: pl.DataFrame, sr: dict) -> np.ndarray | None:
+    """Minutes from each prompt's last token to the prediction cut, or None when unknown.
+
+    ``silence_restriction.reference`` says where the winnower measured its cut from:
+      first_event  (cocoa's ``threshold.duration_s`` / ``horizon_s``) the cut is
+                   ``horizon_minutes`` after the timeline's first event; uses ``s_elapsed_past``.
+      start_time   (``threshold.after_start_time_s``) the cut is ``horizon_minutes`` after the
+                   subject's ``start_time``; uses ``times`` and ``start_time``.
+    A ``first_occurrence`` cut ends the prompt on its trigger token, with no silence: leave the
+    restriction off.
+    """
+    ref = sr.get("reference", "first_event")
+    horizon = float(sr.get("horizon_minutes", 1440))
+    if ref == "first_event":
+        tcol = sr.get("time_column", "s_elapsed_past")
+        if tcol not in df.columns:
+            if sr.get("enabled"):
+                raise ValueError(f"silence_restriction needs the column '{tcol}'")
+            return None
+        last = (df[tcol].list.last().fill_null(0) / 60.0).to_numpy().astype(float)
+    elif ref == "start_time":
+        missing = [c for c in ("times", "start_time", "tokens_past") if c not in df.columns]
+        if missing:
+            if sr.get("enabled"):
+                raise ValueError(f"silence_restriction with reference: start_time needs the columns {missing}")
+            return None
+        last = df.select((pl.col("times").list.get(pl.col("tokens_past").list.len() - 1) - pl.col("start_time"))
+                         .dt.total_milliseconds() / 60000.0).to_series().to_numpy().astype(float)
+    else:
+        raise ValueError(f"silence_restriction.reference must be first_event or start_time, got {ref!r}")
+    if sr.get("enabled") and (last > horizon + 1e-6).any():
+        raise ValueError(f"{int((last > horizon + 1e-6).sum())} prompts have events after horizon_minutes={horizon} "
+                         f"(reference: {ref}); both must match the winnower's prediction cut")
+    return horizon - last
+
+
 def time_token_bounds(cfg: dict, vocab: CocoaVocab) -> dict[int, tuple[float, float]]:
-    """Time-gap token id -> (lo, hi] minutes: the config's bounds, else cocoa's bins present in the vocab."""
+    """Time-gap token id -> (lo, hi] minutes: the config's bounds, else the bins the vocab was built with."""
     gen = cfg["generation"]
     named = ((gen.get("silence_restriction") or {}).get("time_token_bounds")
-             or (gen.get("time_stopping") or {}).get("time_token_bounds") or COCOA_TIME_BINS)
+             or (gen.get("time_stopping") or {}).get("time_token_bounds") or vocab.time_bins())
     return {vocab(n): (float(lo), float(hi)) for n, (lo, hi) in named.items() if n in vocab}
 
 
@@ -167,6 +237,9 @@ def first_token_biases(cfg: dict, vocab: CocoaVocab, cohort: Cohort) -> list[dic
     if not sr.get("enabled"):
         return None
     bounds = time_token_bounds(cfg, vocab)
+    if not bounds:
+        raise ValueError("silence_restriction needs TIME// tokens, and this vocabulary has none (cocoa tokenizes "
+                         "with insert_spacers: false by default); turn the restriction off or re-tokenize with spacers")
     ids = range(vocab.size)
     return [silence_restriction_bias(float(x), bounds, ids, mode=sr.get("mode", "hard"), min_minutes=sr.get("min_minutes"))
             for x in cohort.silence_minutes]
@@ -189,7 +262,8 @@ def build_generation_config(cfg: dict, vocab: CocoaVocab) -> GenerationConfig:
     if ts.get("enabled"):
         trunc_id = vocab(ts.get("trunc_token", "TRUNC"))
         max_time = float(ts["max_time_minutes"])
-        minutes = {vocab(n): math.sqrt(lo * hi) for n, (lo, hi) in (ts.get("time_token_bounds") or COCOA_TIME_BINS).items() if n in vocab}
+        minutes = {vocab(n): math.sqrt(lo * hi) if math.isfinite(hi) else float(lo)
+                   for n, (lo, hi) in (ts.get("time_token_bounds") or vocab.time_bins()).items() if n in vocab}
         suppressed = [s for s in suppressed if s != trunc_id]
     return GenerationConfig(
         max_len=int(gen["max_len"]), n_samp=int(gen["n_samp"]), target_event_id=tracked[0],

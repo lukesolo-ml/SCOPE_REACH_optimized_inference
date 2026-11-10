@@ -27,7 +27,7 @@ generation:
     - DSCG//expired
   end_tokens:
     prefixes: [DSCG]                  # discharge ends a stay
-    names: []
+    names: [EOS]                      # cocoa ends every timeline with EOS
   suppressed_tokens: [BOS]
   prompt_prefix_tokens: []            # e.g. [EOS] if training blocks put EOS before every stay
 
@@ -40,8 +40,9 @@ generation:
     enabled: true
     mode: hard                        # or prop
     horizon_minutes: 1440             # the winnower's prediction cut (24 h)
+    reference: first_event            # winnower threshold.duration_s; start_time for threshold.after_start_time_s
     time_column: s_elapsed_past
-    # time_token_bounds: defaults to cocoa's TIME// bins
+    # time_token_bounds: defaults to the spacers saved in tokenizer.yaml (needs insert_spacers: true)
 
   time_stopping:
     enabled: false

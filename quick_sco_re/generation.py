@@ -56,11 +56,20 @@ allowed. Tracked events cannot be sampled on that step, so its tracked-event
 probability is 0 and it is recorded in ``n_conditioned_steps``.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
-import sglang as sgl
-from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+
+if TYPE_CHECKING:
+    import sglang as sgl
+
+try:  # sglang is optional at import; generation needs it, scoring files and HF passes do not
+    from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+except ImportError:  # pragma: no cover - exercised only without sglang
+    CustomLogitProcessor = object
 
 from .structures import GeneratedTrajectory, GenerationConfig, TrajectoryType
 
