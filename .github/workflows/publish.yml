@@ -1,0 +1,96 @@
+name: publish
+
+# Push a tag v<version> (matching pyproject.toml) to publish. PyPI and TestPyPI take an
+# OIDC token from this workflow (trusted publishing): no API token is stored anywhere.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: test and build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the tag matches pyproject.toml's version
+        shell: python
+        run: |
+          import os, tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag} doesn't match pyproject.toml's version {version}")
+      - name: the tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_REF_NAME points to a commit that isn't on main"; exit 1; }
+      # the release is tested as it will be published, not trusted to an earlier CI run
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install ".[hf,cocoa,dev]" cocoa-tokenizer build twine
+      - run: pytest -q
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: distributions hold no data or notebooks
+        run: |
+          for f in dist/*; do
+            if (tar tzf "$f" 2>/dev/null || unzip -Z1 "$f") | grep -E '\.(parquet|npz|npy|ipynb|csv|pkl)$'; then
+              echo "::error::$f contains data files"; exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: publish to TestPyPI
+    needs: build
+    # a fork's tag can't publish
+    if: github.repository == 'lukesolo-ml/SCOPE_REACH_optimized_inference'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/quick-sco-re
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: publish to PyPI
+    # only after TestPyPI took the same files
+    needs: [build, publish-testpypi]
+    if: github.repository == 'lukesolo-ml/SCOPE_REACH_optimized_inference'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/quick-sco-re
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
